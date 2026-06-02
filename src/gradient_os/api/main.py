@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import socket
+import time
 from contextlib import closing, asynccontextmanager
 from typing import Any, Dict, Tuple
 
@@ -190,6 +191,36 @@ def _coerce_step_transform(raw: Any) -> dict[str, Any]:
     }
 
 
+def _coerce_xyz_payload(raw: Any, field: str) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail=f"{field} must be an object with x/y/z.")
+    out: dict[str, float] = {}
+    for axis in ("x", "y", "z"):
+        try:
+            value = float(raw[axis])
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"{field}.{axis} must be a number.")
+        if not np.isfinite(value):
+            raise HTTPException(status_code=400, detail=f"{field}.{axis} must be finite.")
+        out[axis] = value
+    return out
+
+
+def _coerce_quaternion_payload(raw: Any, field: str) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail=f"{field} must be an object with x/y/z/w.")
+    out: dict[str, float] = {}
+    for axis in ("x", "y", "z", "w"):
+        try:
+            value = float(raw[axis])
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"{field}.{axis} must be a number.")
+        if not np.isfinite(value):
+            raise HTTPException(status_code=400, detail=f"{field}.{axis} must be finite.")
+        out[axis] = value
+    return out
+
+
 class _TelemetryProtocol(asyncio.DatagramProtocol):
     def __init__(self, hub: "TelemetryHub") -> None:
         self.hub = hub
@@ -338,6 +369,7 @@ class TelemetryHub:
 telemetry_hub = TelemetryHub()
 topology_service = CADTopologyService()
 logger = logging.getLogger("uvicorn.error")
+latest_phone_pose: dict[str, Any] | None = None
 _latest_plan_lock = asyncio.Lock()
 _latest_plan: dict[str, Any] | None = None
 
@@ -403,7 +435,7 @@ def create_app() -> FastAPI:
     @api.post("/control/stop", summary="Emergency stop")
     async def control_stop():
         detail = await run_in_threadpool(
-            _controller_call_or_503, "STOP", timeout=1.0, expect_response=True
+            _controller_call_or_503, "STOP", timeout=3.0, expect_response=True
         )
         return {"status": "ok", "detail": detail}
 
@@ -545,6 +577,16 @@ def create_app() -> FastAPI:
         await run_in_threadpool(_controller_call_or_503, cmd, timeout=1.0, expect_response=False)
         return {"status": "ok"}
 
+    @api.post("/control/jog/gripper-velocity", summary="Set realtime gripper jog velocity")
+    async def control_jog_gripper_velocity(payload: dict[str, Any]):
+        try:
+            rate = float(payload.get("rate_deg_s", 0.0))
+        except Exception:
+            raise HTTPException(status_code=400, detail="rate_deg_s must be a number")
+        cmd = f"SET_GRIPPER_JOG_VELOCITY,{rate}"
+        await run_in_threadpool(_controller_call_or_503, cmd, timeout=1.0, expect_response=False)
+        return {"status": "ok"}
+
     @api.post("/control/jog/debug", summary="Enable/disable jog debug logging")
     async def control_jog_debug(payload: dict[str, Any]):
         enabled = bool(payload.get("enabled", False))
@@ -666,6 +708,66 @@ def create_app() -> FastAPI:
                 await telemetry_hub.unregister(token)
 
         return EventSourceResponse(event_generator(), ping=15)
+
+    @api.post("/teleop/phone-pose", summary="Publish latest iPhone teleop pose sample")
+    async def teleop_phone_pose(payload: dict[str, Any]):
+        global latest_phone_pose
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON object required.")
+
+        now = time.time()
+        out: dict[str, Any] = {
+            "status": "ok",
+            "received_at": now,
+            "source": str(payload.get("source", "hebi_mobile_io")),
+            "enabled": bool(payload.get("enabled", False)),
+        }
+        out["position_m"] = _coerce_xyz_payload(payload.get("position_m"), "position_m")
+
+        for optional_xyz in (
+            "delta_m",
+            "reference_position_m",
+            "orientation_euler_deg",
+            "target_linear_m",
+            "target_angular_deg",
+            "target_position_m",
+            "target_orientation_euler_deg",
+            "visual_position_m",
+            "visual_orientation_euler_deg",
+            "command_linear_m_s",
+            "command_angular_deg_s",
+        ):
+            if optional_xyz in payload and payload.get(optional_xyz) is not None:
+                out[optional_xyz] = _coerce_xyz_payload(payload.get(optional_xyz), optional_xyz)
+
+        for optional_quat in (
+            "orientation_quat_xyzw",
+            "target_orientation_quat_xyzw",
+            "visual_orientation_quat_xyzw",
+        ):
+            if payload.get(optional_quat) is not None:
+                out[optional_quat] = _coerce_quaternion_payload(
+                    payload.get(optional_quat),
+                    optional_quat,
+                )
+
+        sequence = payload.get("sequence")
+        if sequence is not None:
+            try:
+                out["sequence"] = int(sequence)
+            except Exception:
+                raise HTTPException(status_code=400, detail="sequence must be an integer.")
+
+        latest_phone_pose = out
+        return {"status": "ok", "received_at": now}
+
+    @api.get("/teleop/phone-pose", summary="Read latest iPhone teleop pose sample")
+    async def teleop_phone_pose_latest():
+        if latest_phone_pose is None:
+            return {"status": "none"}
+        out = dict(latest_phone_pose)
+        out["age_s"] = max(0.0, time.time() - float(out["received_at"]))
+        return out
 
     @api.post("/cad/topology/load-step", summary="Load STEP topology from exact CAD edges")
     async def cad_topology_load_step(payload: dict[str, Any]):

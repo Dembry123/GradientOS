@@ -212,7 +212,7 @@ class Gradient0Config(RobotConfig):
         
         On the Gradient0, most servos are inverted due to their mounting orientation.
         """
-        return {10, 20, 30, 40, 50, 60, 100}
+        return {10, 20, 30, 40, 60, 100}
     
     # =========================================================================
     # Calibration
@@ -399,4 +399,3 @@ class Gradient0Config(RobotConfig):
             60: j6_gains,
             100: gripper_gains,
         }
-

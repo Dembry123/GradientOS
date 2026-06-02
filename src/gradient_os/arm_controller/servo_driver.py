@@ -969,8 +969,9 @@ def get_current_arm_state_rad(verbose: bool = True) -> list[float]:
                 raw_positions[s_id] = pos
             time.sleep(0.01)
 
-    # Convert raw servo values to logical joint angles in radians
-    current_logical_angles_rad = [0.0] * utils.NUM_LOGICAL_JOINTS
+    # Convert raw servo values to logical joint angles in radians. Start from
+    # the previous snapshot so missing feedback does not publish fake zeros.
+    current_logical_angles_rad = list(utils.current_logical_joint_angles_rad)
     
     # Get logical-to-physical mapping from robot config (not hardcoded)
     # Build a map from logical joint index to servo IDs

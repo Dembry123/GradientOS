@@ -256,6 +256,21 @@ trajectory_state = {
     "jog_deadman": False,
     # Jog debug logging verbosity flag
     "jog_debug": False,
+    "jog_diag_file": None,
+    "jog_diag_path": None,
+    "jog_diag_count": 0,
+    "jog_diag_sample_count": 0,
+    # Latest realtime jog/IK health snapshot, emitted on telemetry.
+    "jog_ik_status": {
+        "status": "idle",
+        "reason": "not started",
+        "updated_at": 0.0,
+        "successes_total": 0,
+        "failures_total": 0,
+        "consecutive_failures": 0,
+        "is_jogging": False,
+        "deadman": False,
+    },
 }
 
 # =============================================================================

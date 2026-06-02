@@ -98,7 +98,7 @@ SET_ORIENTATION,0,30,0,1.5,true
 
 #### `JOG_START`
 -   **Syntax:** `JOG_START`
--   **Description:** Enables real-time Cartesian jogging mode. While active, the controller runs a high-frequency loop (100 Hz) that integrates target Cartesian and angular velocities and solves IK each step. This mode can run in parallel with trajectory recording and telemetry.
+-   **Description:** Enables real-time Cartesian jogging mode. While active, the controller runs a 25 Hz loop that integrates target Cartesian and angular velocities and solves IK each step. This mode can run in parallel with trajectory recording and telemetry.
     -   Backend safety: Linear and angular jog rates are capped server-side; IK solutions are clamped to `LOGICAL_JOINT_LIMITS_RAD` before commanding.
 
 #### `SET_JOG_VELOCITY`
@@ -107,7 +107,7 @@ SET_ORIENTATION,0,30,0,1.5,true
 -   **Parameters:**
     -   `vx, vy, vz` (float, required): Linear velocities in meters/second (base frame).
     -   `v_roll, v_pitch, v_yaw` (float, required): Angular rates in degrees/second (XYZ intrinsic order).
--   Notes: If no `SET_JOG_VELOCITY` is received for 0.2 s, velocities are auto-zeroed for safety.
+-   Notes: If no `SET_JOG_VELOCITY` is received for 0.5 s, velocities are auto-zeroed for safety.
 
 #### `JOG_STOP`
 -   **Syntax:** `JOG_STOP`

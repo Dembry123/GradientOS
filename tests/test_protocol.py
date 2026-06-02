@@ -4,6 +4,30 @@ import os
 
 from gradient_os.arm_controller import servo_protocol
 from gradient_os.arm_controller import utils
+from gradient_os.arm_controller.backends.feetech import config as feetech_config
+from gradient_os.arm_controller.backends.feetech import protocol as feetech_protocol
+
+
+class FakeSerial:
+    def __init__(self, response: bytes):
+        self.response = response
+        self.timeout = 0.1
+        self.is_open = True
+        self.writes: list[bytes] = []
+
+    def reset_input_buffer(self) -> None:
+        pass
+
+    def write(self, packet: bytes) -> None:
+        self.writes.append(bytes(packet))
+
+    def read(self, size: int) -> bytes:
+        return self.response[:size]
+
+
+def _status_packet(servo_id: int, status: int, data: bytes) -> bytes:
+    body = bytes([servo_id, len(data) + 2, status]) + data
+    return b"\xff\xff" + body + bytes([feetech_protocol.calculate_checksum(body)])
 
 class TestServoProtocol(unittest.TestCase):
     """
@@ -33,6 +57,12 @@ class TestServoProtocol(unittest.TestCase):
             (10, 1000, 100, 1), # (id, pos, speed, accel)
             (20, 2000, 200, 2),
         ]
+        if utils.SERVO_INSTRUCTION_SYNC_WRITE is None:
+            utils.SERVO_HEADER = feetech_config.SERVO_HEADER
+            utils.SERVO_BROADCAST_ID = feetech_config.SERVO_BROADCAST_ID
+            utils.SERVO_INSTRUCTION_SYNC_WRITE = feetech_config.SERVO_INSTRUCTION_SYNC_WRITE
+            utils.SYNC_WRITE_START_ADDRESS = feetech_config.SYNC_WRITE_START_ADDRESS
+            utils.SYNC_WRITE_DATA_LEN_PER_SERVO = feetech_config.SYNC_WRITE_DATA_LEN_PER_SERVO
         
         # Manually construct the expected packet
         # pos 1000 = 0x03E8 -> [0xE8, 0x03]
@@ -73,6 +103,42 @@ class TestServoProtocol(unittest.TestCase):
             actual_packet = mock_serial.write.call_args[0][0]
             self.assertEqual(actual_packet, expected_packet)
 
+    def test_feetech_sync_read_keeps_position_with_status_error(self) -> None:
+        """
+        Servo status bits such as overload should raise an alert but should not
+        cause valid position bytes to be discarded.
+        """
+        packet = _status_packet(20, 0x20, bytes([0x5C, 0x06]))
+        alerts_seen: list[tuple[int, int, list[str]]] = []
+
+        positions = feetech_protocol.sync_read_positions(
+            FakeSerial(packet),
+            [20],
+            alert_callback=lambda sid, code, names: alerts_seen.append((sid, code, names)),
+        )
+
+        self.assertEqual(positions, {20: 1628})
+        self.assertEqual(alerts_seen, [(20, 0x20, ["Overload"])])
+
+    def test_feetech_sync_read_block_keeps_data_with_status_error(self) -> None:
+        packet = _status_packet(20, 0x20, bytes([0x5C, 0x06]))
+
+        block = feetech_protocol.sync_read_block(
+            FakeSerial(packet),
+            [20],
+            start_address=0x38,
+            data_len=2,
+        )
+
+        self.assertEqual(block, {20: bytes([0x5C, 0x06])})
+
+    def test_feetech_status_telemetry_uses_status_bit_names(self) -> None:
+        data = bytes([0x20, 0x00, 0x00, 0x00, 0x00])
+
+        parsed = feetech_config.parse_telemetry_block2(data)
+
+        self.assertEqual(parsed["status_names"], ["Overload"])
+
 
 if __name__ == '__main__':
-    unittest.main() 
+    unittest.main()

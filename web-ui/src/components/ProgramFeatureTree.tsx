@@ -1,4 +1,5 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown, ChevronRight, ChevronUp } from "lucide-react";
 import type { Point3, ProgramNode, ProgramTreeViewMode } from "../previewUtils";
 
 type ProgramFeatureTreeProps = {
@@ -119,20 +120,38 @@ export function ProgramFeatureTree({
   onApplyWaypointEdits,
 }: ProgramFeatureTreeProps) {
   const expanded = new Set(expandedNodeIds);
+  const [isCollapsed, setIsCollapsed] = useState(false);
   const parseOrKeep = (raw: string, fallback: number) => {
     const parsed = Number.parseFloat(raw);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
   return (
-    <div className="pointer-events-auto absolute right-6 top-6 z-30 w-[340px] max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-700/70 bg-slate-950/82 p-3 shadow-2xl shadow-black/40 backdrop-blur">
-      <div className="mb-2 flex items-center justify-between">
+    <div
+      className={`pointer-events-auto absolute bottom-6 left-40 z-20 max-w-[calc(100vw-11rem)] rounded-2xl border border-slate-700/70 bg-slate-950/82 shadow-2xl shadow-black/40 backdrop-blur ${
+        isCollapsed ? "w-auto p-2" : "w-[340px] p-3"
+      }`}
+    >
+      <div className={`flex items-center justify-between gap-2 ${isCollapsed ? "" : "mb-2"}`}>
         <span className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-200/80">
           Program Tree
         </span>
-        <span className="text-[10px] text-slate-400">
-          {root ? root.label : "No program loaded"}
-        </span>
+        {isCollapsed ? null : (
+          <span className="min-w-0 truncate text-[10px] text-slate-400">
+            {root ? root.label : "No program loaded"}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => setIsCollapsed((v) => !v)}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
+          aria-label={isCollapsed ? "Expand program tree" : "Collapse program tree"}
+          title={isCollapsed ? "Expand" : "Collapse"}
+        >
+          {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+        </button>
       </div>
+      {isCollapsed ? null : (
+      <div>
       <div className="mb-2 flex items-center justify-end gap-1 text-[10px]">
         <button
           type="button"
@@ -239,6 +258,8 @@ export function ProgramFeatureTree({
           </button>
         </div>
       ) : null}
+      </div>
+      )}
     </div>
   );
 }

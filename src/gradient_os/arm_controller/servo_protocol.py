@@ -155,7 +155,7 @@ def ping(servo_id: int) -> bool:
     """
     # Dispatch to backend if available
     backend = _get_backend()
-    if backend and hasattr(backend, 'ping_actuator'):
+    if backend and getattr(backend, "is_initialized", False) and hasattr(backend, 'ping_actuator'):
         result = backend.ping_actuator(servo_id)
         if result:
             _present_servo_ids.add(servo_id)
@@ -181,16 +181,26 @@ def ping(servo_id: int) -> bool:
         with _SERIAL_LOCK:
             utils.ser.reset_input_buffer()
             utils.ser.write(ping_command)
-            
-            # A successful ping should receive a status packet in response
-            # Status Packet: [0xFF, 0xFF, ID, Length=2, Error=0, Checksum]
-            # We'll just check if we get *any* valid response for the correct ID
-            response = utils.ser.read(6) # Read the expected status packet length
 
-        if len(response) == 6 and response[0] == 0xFF and response[1] == 0xFF and response[2] == servo_id:
-            # We have a response from the correct servo. Add to cache.
-            _present_servo_ids.add(servo_id)
-            return True
+            # CH340-style half-duplex adapters can echo the 6-byte PING
+            # command before the servo's 6-byte status packet. Read a wider
+            # window and ignore the exact echoed command.
+            time.sleep(0.005)
+            response = utils.ser.read(24)
+
+        for idx in range(max(0, len(response) - 5)):
+            frame = bytes(response[idx : idx + 6])
+            if (
+                len(frame) == 6
+                and frame[0] == utils.SERVO_HEADER
+                and frame[1] == utils.SERVO_HEADER
+                and frame[2] == servo_id
+                and calculate_checksum(bytearray(frame[2:5])) == frame[5]
+            ):
+                if frame == bytes(ping_command):
+                    continue
+                _present_servo_ids.add(servo_id)
+                return True
             
         return False
 
@@ -472,7 +482,7 @@ def read_servo_position(servo_id: int) -> int | None:
     """
     # Dispatch to backend if available
     backend = _get_backend()
-    if backend and hasattr(backend, 'read_single_actuator_position'):
+    if backend and getattr(backend, "is_initialized", False) and hasattr(backend, 'read_single_actuator_position'):
         return backend.read_single_actuator_position(servo_id)
     
     # Fallback to direct serial communication
@@ -730,7 +740,7 @@ def sync_write_goal_pos_speed_accel(servo_data_list: list[tuple[int, int, int, i
     """
     # Dispatch to backend if available
     backend = _get_backend()
-    if backend and hasattr(backend, 'sync_write'):
+    if backend and getattr(backend, "is_initialized", False) and hasattr(backend, 'sync_write'):
         backend.sync_write(servo_data_list)
         return
     
@@ -850,7 +860,7 @@ def factory_reset_servo(servo_id: int) -> bool:
     """
     # Dispatch to backend if available
     backend = _get_backend()
-    if backend and hasattr(backend, 'factory_reset_actuator'):
+    if backend and getattr(backend, "is_initialized", False) and hasattr(backend, 'factory_reset_actuator'):
         return backend.factory_reset_actuator(servo_id)
     
     # Fallback to direct serial communication
@@ -895,7 +905,7 @@ def restart_servo(servo_id: int) -> bool:
     """
     # Dispatch to backend if available
     backend = _get_backend()
-    if backend and hasattr(backend, 'restart_actuator'):
+    if backend and getattr(backend, "is_initialized", False) and hasattr(backend, 'restart_actuator'):
         return backend.restart_actuator(servo_id)
     
     # Fallback to direct serial communication
@@ -955,7 +965,7 @@ def sync_read_positions(
     # Note: The ActuatorBackend.sync_read_positions() doesn't take servo_ids as an argument.
     # The backend reads from all configured arm servos internally.
     backend = _get_backend()
-    if backend and hasattr(backend, 'sync_read_positions'):
+    if backend and getattr(backend, "is_initialized", False) and hasattr(backend, 'sync_read_positions'):
         return backend.sync_read_positions(timeout_s=timeout_s)
     
     # Fallback to direct serial communication
@@ -1035,7 +1045,12 @@ def sync_read_positions(
                     # print(f"[Pi SyncRead] Found packet for unexpected ID {response_id}. Ignoring.")
                     continue
 
-                # Error byte validation
+                # Checksum validation
+                expected_checksum = calculate_checksum(packet_candidate[2:7])
+                if expected_checksum != packet_candidate[7]:
+                    print(f"[Pi SyncRead] Checksum mismatch for servo {response_id}. Ignoring packet.")
+                    continue # Skip this packet
+
                 if packet_candidate[4] != 0:
                     names = alerts.names_for_status_bits(int(packet_candidate[4]))
                     print(f"[Pi SyncRead] Servo {response_id} reported error: {int(packet_candidate[4])} ({', '.join(names)})")
@@ -1047,13 +1062,6 @@ def sync_read_positions(
                         details={"status_byte": int(packet_candidate[4])},
                         key=f"SERVO_STATUS:{int(response_id)}:{int(packet_candidate[4])}",
                     )
-                    continue # Skip this packet
-
-                # Checksum validation
-                expected_checksum = calculate_checksum(packet_candidate[2:7])
-                if expected_checksum != packet_candidate[7]:
-                    print(f"[Pi SyncRead] Checksum mismatch for servo {response_id}. Ignoring packet.")
-                    continue # Skip this packet
                 
                 # If we're here, the packet is valid
                 position = int.from_bytes(packet_candidate[5:7], byteorder='little', signed=True)
@@ -1191,7 +1199,12 @@ def fast_sync_read_positions(
                     # print(f"[Pi SyncRead] Found packet for unexpected ID {response_id}. Ignoring.")
                     continue
 
-                # Error byte validation
+                # Checksum validation
+                expected_checksum = calculate_checksum(packet_candidate[2:7])
+                if expected_checksum != packet_candidate[7]:
+                    print(f"[Pi SyncRead] Checksum mismatch for servo {response_id}. Ignoring packet.")
+                    continue # Skip this packet
+
                 if packet_candidate[4] != 0:
                     names = alerts.names_for_status_bits(int(packet_candidate[4]))
                     print(f"[Pi SyncRead] Servo {response_id} reported error: {int(packet_candidate[4])} ({', '.join(names)})")
@@ -1203,13 +1216,6 @@ def fast_sync_read_positions(
                         details={"status_byte": int(packet_candidate[4])},
                         key=f"SERVO_STATUS:{int(response_id)}:{int(packet_candidate[4])}",
                     )
-                    continue # Skip this packet
-
-                # Checksum validation
-                expected_checksum = calculate_checksum(packet_candidate[2:7])
-                if expected_checksum != packet_candidate[7]:
-                    print(f"[Pi SyncRead] Checksum mismatch for servo {response_id}. Ignoring packet.")
-                    continue # Skip this packet
                 
                 # If we're here, the packet is valid
                 position = int.from_bytes(packet_candidate[5:7], byteorder='little', signed=True)
@@ -1268,7 +1274,7 @@ def sync_read_block(
     """
     # Dispatch to backend if available
     backend = _get_backend()
-    if backend and hasattr(backend, 'sync_read_block'):
+    if backend and getattr(backend, "is_initialized", False) and hasattr(backend, 'sync_read_block'):
         return backend.sync_read_block(servo_ids, start_address=start_address, data_len=data_len)
     
     # Fallback to direct serial communication
@@ -1332,14 +1338,23 @@ def sync_read_block(
                 pkt = response_data[i : i + per_packet]
                 sid = pkt[2]
                 if sid in expected_ids:
-                    # Validate error == 0 and checksum
-                    if pkt[4] == 0:
-                        if calculate_checksum(pkt[2: (2 + 1 + 1 + 1 + data_len)]) == pkt[-1]:
-                            results[sid] = bytes(pkt[5 : 5 + data_len])
-                            expected_ids.discard(sid)
-                            i += per_packet
-                            continue
-                    else:
+                    if calculate_checksum(pkt[2: (2 + 1 + 1 + 1 + data_len)]) == pkt[-1]:
+                        if pkt[4] != 0:
+                            names = alerts.names_for_status_bits(int(pkt[4]))
+                            print(f"[Pi SyncReadBlk] Servo {sid} reported error: {int(pkt[4])} ({', '.join(names)})")
+                            alerts.push_alert(
+                                level="error",
+                                kind="SERVO_STATUS",
+                                message=f"Servo {int(sid)} reported: {', '.join(names) or 'Unknown error'}",
+                                servo_ids=[int(sid)],
+                                details={"status_byte": int(pkt[4]), "start_address": int(start_address), "len": int(data_len)},
+                                key=f"SERVO_STATUS:{int(sid)}:{int(pkt[4])}",
+                            )
+                        results[sid] = bytes(pkt[5 : 5 + data_len])
+                        expected_ids.discard(sid)
+                        i += per_packet
+                        continue
+                    if pkt[4] != 0:
                         names = alerts.names_for_status_bits(int(pkt[4]))
                         print(f"[Pi SyncReadBlk] Servo {sid} reported error: {int(pkt[4])} ({', '.join(names)})")
                         alerts.push_alert(

@@ -13,6 +13,8 @@ import type { Point3 } from "./previewUtils";
 
 type ArmVisualizerProps = {
   joints?: number[];
+  jogIk?: JogIkTelemetry | null;
+  phonePose?: PhonePoseTelemetry | null;
   showBoundingBox: boolean;
   selectionMode: boolean;
   onPointSelected?: (point: { x: number; y: number; z: number }) => void;
@@ -33,6 +35,34 @@ type ArmVisualizerProps = {
   stepFile?: File | null;
   stepTransform?: StepTransform;
   onStepStatusChange?: (status: StepLoadStatus) => void;
+};
+
+export type PhonePoseTelemetry = {
+  status?: "ok" | "none" | string;
+  age_s?: number;
+  enabled?: boolean;
+  position_m?: { x: number; y: number; z: number };
+  delta_m?: { x: number; y: number; z: number };
+  orientation_quat_xyzw?: { x: number; y: number; z: number; w: number };
+  orientation_euler_deg?: { x: number; y: number; z: number };
+  target_linear_m?: { x: number; y: number; z: number };
+  target_angular_deg?: { x: number; y: number; z: number };
+  target_position_m?: { x: number; y: number; z: number };
+  target_orientation_quat_xyzw?: { x: number; y: number; z: number; w: number };
+  target_orientation_euler_deg?: { x: number; y: number; z: number };
+  visual_position_m?: { x: number; y: number; z: number };
+  visual_orientation_quat_xyzw?: { x: number; y: number; z: number; w: number };
+  visual_orientation_euler_deg?: { x: number; y: number; z: number };
+  command_linear_m_s?: { x: number; y: number; z: number };
+  command_angular_deg_s?: { x: number; y: number; z: number };
+  source?: string;
+  sequence?: number;
+};
+
+export type JogIkTelemetry = {
+  status?: string;
+  consecutive_failures?: number;
+  deadman?: boolean;
 };
 
 const GRID_CELL_SIZE = 0.05; // 10 cm per square
@@ -71,6 +101,30 @@ const TOPOLOGY_EDGE_HOVER_COLOR = 0xfacc15;
 const TOPOLOGY_EDGE_SELECTED_COLOR = 0x22c55e;
 const TOPOLOGY_EDGE_PICK_RADIUS_M = 0.0005; // 0.5 mm
 const TOPOLOGY_EDGE_SELECTED_RADIUS_M = 0.0006;
+const PHONE_VISUAL_ANCHOR = new THREE.Vector3(-0.42, -0.38, 0.32);
+
+function isFiniteVector3(
+  value?: { x: number; y: number; z: number } | null,
+): value is { x: number; y: number; z: number } {
+  return Boolean(
+    value &&
+      Number.isFinite(value.x) &&
+      Number.isFinite(value.y) &&
+      Number.isFinite(value.z),
+  );
+}
+
+function isFiniteQuaternion(
+  value?: { x: number; y: number; z: number; w: number } | null,
+): value is { x: number; y: number; z: number; w: number } {
+  return Boolean(
+    value &&
+      Number.isFinite(value.x) &&
+      Number.isFinite(value.y) &&
+      Number.isFinite(value.z) &&
+      Number.isFinite(value.w),
+  );
+}
 
 type OcctImporter = {
   ReadStepFile?: (
@@ -310,6 +364,93 @@ function createAxisTripod(options: {
   return group;
 }
 
+function createPhonePoseModel(): THREE.Group {
+  const group = new THREE.Group();
+  group.name = "phone-pose-visual";
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.15, 0.075, 0.012),
+    new THREE.MeshStandardMaterial({
+      color: 0x111827,
+      metalness: 0.45,
+      roughness: 0.38,
+    }),
+  );
+  body.name = "phone-body";
+  group.add(body);
+
+  const screen = new THREE.Mesh(
+    new THREE.BoxGeometry(0.132, 0.067, 0.002),
+    new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0ea5e9,
+      emissiveIntensity: 0.18,
+      roughness: 0.5,
+    }),
+  );
+  screen.name = "phone-screen";
+  screen.position.z = 0.0072;
+  group.add(screen);
+
+  const topMarker = new THREE.Mesh(
+    new THREE.BoxGeometry(0.006, 0.028, 0.003),
+    new THREE.MeshBasicMaterial({ color: 0xfacc15 }),
+  );
+  topMarker.name = "phone-top-marker";
+  topMarker.position.set(0.071, 0, 0.009);
+  group.add(topMarker);
+
+  const axes = createAxisTripod({
+    length: 0.105,
+    radius: 0.0016,
+    headLength: 0.014,
+    headRadius: 0.0045,
+    includeLabels: false,
+  });
+  axes.name = "phone-world-axes";
+  group.add(axes);
+
+  group.visible = false;
+  return group;
+}
+
+function phoneStatusColors(
+  pose: PhonePoseTelemetry | null,
+  jogIk: JogIkTelemetry | null,
+): { body: number; screen: number; emissive: number; intensity: number } {
+  const isEnabled = Boolean(pose?.enabled);
+  const status = jogIk?.status;
+  const failures = jogIk?.consecutive_failures ?? 0;
+  if (isEnabled && (status === "ik_failed" || status === "fk_failed" || status === "apply_failed" || failures > 0)) {
+    return { body: 0x4c0519, screen: 0xfb7185, emissive: 0xe11d48, intensity: 0.85 };
+  }
+  if (isEnabled && status === "ok") {
+    return { body: 0x052e1a, screen: 0x34d399, emissive: 0x10b981, intensity: 0.55 };
+  }
+  if (isEnabled && (status === "holding" || status === "timeout_zeroed")) {
+    return { body: 0x422006, screen: 0xfbbf24, emissive: 0xf59e0b, intensity: 0.45 };
+  }
+  return { body: 0x111827, screen: 0x38bdf8, emissive: 0x0ea5e9, intensity: 0.18 };
+}
+
+function setPhonePoseStatusMaterial(
+  phoneModel: THREE.Group,
+  pose: PhonePoseTelemetry | null,
+  jogIk: JogIkTelemetry | null,
+) {
+  const colors = phoneStatusColors(pose, jogIk);
+  const body = phoneModel.getObjectByName("phone-body") as THREE.Mesh | undefined;
+  const screen = phoneModel.getObjectByName("phone-screen") as THREE.Mesh | undefined;
+  if (body?.material instanceof THREE.MeshStandardMaterial) {
+    body.material.color.setHex(colors.body);
+  }
+  if (screen?.material instanceof THREE.MeshStandardMaterial) {
+    screen.material.color.setHex(colors.screen);
+    screen.material.emissive.setHex(colors.emissive);
+    screen.material.emissiveIntensity = colors.intensity;
+  }
+}
+
 function applyStepTransform(root: THREE.Group, transform?: StepTransform) {
   const next = transform ?? DEFAULT_STEP_TRANSFORM;
   // Apply STEP transform directly in scene/world axes.
@@ -357,6 +498,8 @@ export type ArmVisualizerHandle = {
 export const ArmVisualizer = forwardRef(function ArmVisualizer(
   {
     joints,
+    jogIk,
+    phonePose,
     showBoundingBox,
     selectionMode,
     onPointSelected,
@@ -388,6 +531,12 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
   const previousTimeRef = useRef<number | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const phonePoseRef = useRef<PhonePoseTelemetry | null>(null);
+  const jogIkRef = useRef<JogIkTelemetry | null>(null);
+  const phonePoseObjectRef = useRef<THREE.Group | null>(null);
+  const phoneTargetPositionRef = useRef(new THREE.Vector3());
+  const phoneTargetQuaternionRef = useRef(new THREE.Quaternion());
+  const robotTargetQuaternionRef = useRef(new THREE.Quaternion());
   const initialControlsTarget = useRef(new THREE.Vector3(0.25, 0.15, 0));
   const defaultCameraOffset = useRef(new THREE.Vector3(1.15, 0.85, 1.6));
   const defaultCameraOffsetCaptured = useRef(false);
@@ -494,6 +643,11 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
     });
     worldAxes.position.set(0, 0, 0);
     scene.add(worldAxes);
+    const phoneModel = createPhonePoseModel();
+    phoneModel.position.copy(PHONE_VISUAL_ANCHOR);
+    scene.add(phoneModel);
+    phonePoseObjectRef.current = phoneModel;
+
     const orientationScene = new THREE.Scene();
     const orientationAxes = createAxisTripod({
       length: 0.4,
@@ -1004,6 +1158,89 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
         alignToGroundAndUpdateBounds({ snapCamera: false, applySnapshot: false });
       }
 
+      const phoneModel = phonePoseObjectRef.current;
+      if (phoneModel) {
+        const pose = phonePoseRef.current;
+        const jogIkStatus = jogIkRef.current;
+        const visualPosition = pose?.visual_position_m;
+        const targetPosition = pose?.target_position_m;
+        const delta = pose?.delta_m ?? pose?.position_m;
+        const isFresh = typeof pose?.age_s !== "number" || pose.age_s < 2;
+        if (
+          pose?.status === "ok" &&
+          (isFiniteVector3(visualPosition) ||
+            isFiniteVector3(targetPosition) ||
+            isFiniteVector3(delta)) &&
+          isFresh
+        ) {
+          phoneModel.visible = true;
+          setPhonePoseStatusMaterial(phoneModel, pose ?? null, jogIkStatus);
+          if (isFiniteVector3(visualPosition) || isFiniteVector3(targetPosition)) {
+            const scenePosition = visualPosition ?? targetPosition!;
+            const targetScenePosition = phoneTargetPositionRef.current.set(
+              scenePosition.x,
+              scenePosition.y,
+              scenePosition.z,
+            );
+            const robotForFrame = robotRef.current;
+            if (robotForFrame) {
+              robotForFrame.localToWorld(targetScenePosition);
+            }
+            phoneModel.position.copy(targetScenePosition);
+          } else if (isFiniteVector3(delta)) {
+            phoneModel.position.set(
+              PHONE_VISUAL_ANCHOR.x + delta.x,
+              PHONE_VISUAL_ANCHOR.y + delta.y,
+              PHONE_VISUAL_ANCHOR.z + delta.z,
+            );
+          }
+
+          const quat =
+            pose.visual_orientation_quat_xyzw ??
+            pose.target_orientation_quat_xyzw ??
+            pose.orientation_quat_xyzw;
+          if (isFiniteQuaternion(quat)) {
+            const targetQuaternion = phoneTargetQuaternionRef.current.set(
+              quat.x,
+              quat.y,
+              quat.z,
+              quat.w,
+            ).normalize();
+            if (
+              (isFiniteVector3(visualPosition) || isFiniteVector3(targetPosition)) &&
+              robotRef.current
+            ) {
+              const robotQuaternion = robotTargetQuaternionRef.current;
+              robotRef.current.getWorldQuaternion(robotQuaternion);
+              phoneModel.quaternion.copy(robotQuaternion.multiply(targetQuaternion)).normalize();
+            } else {
+              phoneModel.quaternion.copy(targetQuaternion);
+            }
+          } else if (
+            pose.visual_orientation_euler_deg ??
+            pose.target_orientation_euler_deg ??
+            pose.orientation_euler_deg
+          ) {
+            const eulerDeg =
+              pose.visual_orientation_euler_deg ??
+              pose.target_orientation_euler_deg ??
+              pose.orientation_euler_deg!;
+            phoneModel.rotation.set(
+              THREE.MathUtils.degToRad(eulerDeg.x),
+              THREE.MathUtils.degToRad(eulerDeg.y),
+              THREE.MathUtils.degToRad(eulerDeg.z),
+            );
+          }
+
+          const phoneAxes = phoneModel.getObjectByName("phone-world-axes");
+          if (phoneAxes) {
+            phoneAxes.quaternion.copy(phoneModel.quaternion).invert();
+          }
+        } else {
+          phoneModel.visible = false;
+        }
+      }
+
       controls.update();
       const canvasWidth = container.clientWidth;
       const canvasHeight = container.clientHeight;
@@ -1054,6 +1291,11 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
       }
       scene.remove(worldAxes);
       disposeObject3D(worldAxes);
+      if (phonePoseObjectRef.current) {
+        scene.remove(phonePoseObjectRef.current);
+        disposeObject3D(phonePoseObjectRef.current);
+        phonePoseObjectRef.current = null;
+      }
       disposeObject3D(orientationAxes);
       orientationScene.clear();
       if (container.contains(renderer.domElement)) {
@@ -1705,6 +1947,14 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
       pendingDynamicBoundsRef.current = true;
     }
   }, [joints]);
+
+  useEffect(() => {
+    phonePoseRef.current = phonePose ?? null;
+  }, [phonePose]);
+
+  useEffect(() => {
+    jogIkRef.current = jogIk ?? null;
+  }, [jogIk]);
 
   useEffect(() => {
     showBoundingBoxRef.current = showBoundingBox;

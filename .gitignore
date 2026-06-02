@@ -29,6 +29,7 @@ dist/
 # Logs and data
 # ----------------------------------------------------------------
 *.log
+*.pid
 performance_log.csv
 performance_charts.png
 servo_telemetry.csv
@@ -49,6 +50,7 @@ converted_le_robot_datasets/*
 # ----------------------------------------------------------------
 .vscode/
 .idea/
+.claude/settings.local.json
 
 # OS-generated files
 # ----------------------------------------------------------------

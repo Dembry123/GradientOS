@@ -272,6 +272,49 @@ Notes:
 - With **realtime jog on** (press the **Start** button in the Realtime Jog block), the same buttons switch to press‑and‑hold behavior and the UI streams velocity vectors through `/control/jog/velocity`. The `Deadman` checkbox still gates whether any motion is commanded in this mode, and the `Linear` / `Angular` fields are interpreted as base linear and angular rates for the realtime vector.
 - Jog start/stop avoids re‑issuing servo commands when the jog vector is zero: the controller caches the last posture, skips IK work whenever both linear and angular rates are zero, and only sends new setpoints when an axis is actually pressed. This prevents the robot from creeping when operators simply toggle realtime on/off.
 
+### iPhone ARKit teleop through HEBI Mobile I/O
+
+GradientOS has an optional HEBI Mobile I/O bridge for using an iPhone as a 6-DoF spatial controller. This follows the LeRobot phone teleop convention: HEBI Mobile I/O streams ARKit pose, **B1** is the deadman/enable button, **B2** opens the gripper, **B4** closes the gripper, **A3** remains available as gripper velocity, and **B8** quits the bridge. GradientOS still owns jog safety, IK, velocity caps, and servo commands.
+
+Install the optional phone dependency:
+
+```bash
+uv pip install -e '.[phone]'
+```
+
+On the iPhone:
+
+- Install and open **HEBI Mobile I/O**.
+- Keep the phone on the same LAN as the GradientOS API host.
+- In iOS Settings for Mobile I/O, set family/name to `HEBI` / `mobileIO` unless you pass different CLI flags.
+- Allow camera access so ARKit pose is available.
+
+Run discovery and mapping in dry-run mode first:
+
+```bash
+gradient-iphone-hebi-teleop \
+  --api-host http://127.0.0.1:4000 \
+  --list-devices
+```
+
+Hold the phone screen-up with the top edge pointing the same direction as the gripper, then hold **B1**. B1 is also the translation recenter/clutch control: release it, reposition the phone comfortably, then hold B1 again to seed phone translation from the robot's current tool position. Each B1 latch captures the phone's current ARKit orientation as the translation frame, so fresh ARKit origins/headings are normalized by the latch. The default phone-axis map is `y,-x,z`: HEBI/ARKit phone-local `+Y` maps to robot `+X`, phone-local `+X` maps to robot `-Y`, and phone-local `+Z` maps to robot `+Z`. This makes moving the phone forward from the held pose map to teleop forward even if Mobile I/O started with a different world heading. Orientation is intentionally different: the first live latch calibrates phone orientation to tool orientation, and later B1 re-engages keep using the phone's current physical orientation as the desired tool orientation under the normal angular speed/IK limits. Dry-run prints the jog commands it would send without moving the robot. To command the running GradientOS API after confirming the mapping feels right:
+
+```bash
+gradient-iphone-hebi-teleop \
+  --api-host http://127.0.0.1:4000 \
+  --live
+```
+
+Safety defaults are intentionally conservative where they affect motion rate: dry-run unless `--live` is passed, 25 Hz bridge loop, default phone-to-robot axis map `y,-x,z`, 1:1 translation target scale, 0.35 s stale-feedback release, automatic Mobile I/O reconnect scanning after sustained stale feedback, 0.08 m/s linear cap, 45 deg/s angular cap, small hold-still deadbands (`--linear-deadband-m`, `--angular-deadband-deg`), and jog stop on B1 release. By default the bridge does not clamp the robot command target offset or target rotation; full mapped phone delta becomes the command target, then speed caps, IK reachability, and joint limits determine how the robot approaches it. The bridge also publishes phone pose, unclamped phone-marker pose, and robot command target samples to `/teleop/phone-pose`. The web UI phone-shaped cuboid uses the unclamped phone-marker pose so it starts at the gripper on B1 engage and remains free to show raw phone motion. Tune robot motion with `--phone-axis-map`, `--translation-scale`, `--rotation-scale`, `--max-linear-m-s`, and `--max-angular-deg-s`. If you intentionally want a target leash, pass finite `--max-target-offset-m` or `--max-target-rotation-deg`; `0`, negative values, or `inf` leave that target dimension unlimited. If an axis feels backwards for your phone hold, flip the mapped output axes with `--invert-x`, `--invert-y`, `--invert-z`, `--invert-roll`, `--invert-pitch`, or `--invert-yaw`.
+
+To run the no-motion calibration prompts:
+
+```bash
+gradient-iphone-hebi-teleop \
+  --api-host http://127.0.0.1:4000 \
+  --calibrate-phone-frame
+```
+
 
 ## Running as a systemd Service
 

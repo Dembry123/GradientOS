@@ -91,7 +91,7 @@ def patch_send(monkeypatch):
             return None
 
         @staticmethod
-        def plan_preview_trajectory_points(points, preview_name="__planner_preview__", weld_metadata=None):
+        def plan_preview_trajectory_points(points, preview_name="__planner_preview__", weld_metadata=None, sections=None):
             if not points:
                 raise ValueError("no points")
             body = dict(planner_payload)
@@ -101,6 +101,8 @@ def patch_send(monkeypatch):
             body["trajectory"] = dict(DummyCommandApi.sample_traj)
             if weld_metadata:
                 body["trajectory"]["weld"] = weld_metadata
+            if sections:
+                body["trajectory"]["sections"] = sections
             return body
 
     class DummyTopologyService:
@@ -150,6 +152,7 @@ def patch_send(monkeypatch):
     monkeypatch.setattr(
         "gradient_os.api.main._WELD_PROGRAM_DIR", tempfile.mkdtemp(prefix="weld-programs-")
     )
+    monkeypatch.setattr("gradient_os.api.main.latest_phone_pose", None)
     yield call_log
 
 
@@ -229,6 +232,51 @@ def test_info_orientation(client):
             [0.0, 0.0, 1.0],
         ]
     }
+
+
+def test_control_jog_gripper_velocity(client):
+    resp = client.post("/control/jog/gripper-velocity", json={"rate_deg_s": 12.5})
+    assert resp.status_code == 200
+    assert client.command_calls[-1] == ("SET_GRIPPER_JOG_VELOCITY,12.5", 1.0, False)
+
+
+def test_teleop_phone_pose_round_trip(client):
+    payload = {
+        "source": "test",
+        "enabled": True,
+        "sequence": 7,
+        "position_m": {"x": 1.0, "y": 2.0, "z": 3.0},
+        "delta_m": {"x": 0.1, "y": -0.2, "z": 0.3},
+        "orientation_quat_xyzw": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+        "orientation_euler_deg": {"x": 10.0, "y": 20.0, "z": 30.0},
+        "target_position_m": {"x": 0.4, "y": 0.5, "z": 0.6},
+        "target_orientation_quat_xyzw": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+        "target_orientation_euler_deg": {"x": 1.0, "y": 2.0, "z": 3.0},
+        "visual_position_m": {"x": 0.7, "y": 0.8, "z": 0.9},
+        "visual_orientation_quat_xyzw": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+        "visual_orientation_euler_deg": {"x": 4.0, "y": 5.0, "z": 6.0},
+    }
+
+    resp = client.post("/teleop/phone-pose", json=payload)
+    assert resp.status_code == 200
+
+    resp = client.get("/teleop/phone-pose")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["source"] == "test"
+    assert body["enabled"] is True
+    assert body["sequence"] == 7
+    assert body["position_m"] == {"x": 1.0, "y": 2.0, "z": 3.0}
+    assert body["delta_m"] == {"x": 0.1, "y": -0.2, "z": 0.3}
+    assert body["orientation_quat_xyzw"]["w"] == pytest.approx(1.0)
+    assert body["target_position_m"] == {"x": 0.4, "y": 0.5, "z": 0.6}
+    assert body["target_orientation_quat_xyzw"]["w"] == pytest.approx(1.0)
+    assert body["target_orientation_euler_deg"] == {"x": 1.0, "y": 2.0, "z": 3.0}
+    assert body["visual_position_m"] == {"x": 0.7, "y": 0.8, "z": 0.9}
+    assert body["visual_orientation_quat_xyzw"]["w"] == pytest.approx(1.0)
+    assert body["visual_orientation_euler_deg"] == {"x": 4.0, "y": 5.0, "z": 6.0}
+    assert body["age_s"] >= 0
 
 
 def test_trajectory_plan_record_end(client):

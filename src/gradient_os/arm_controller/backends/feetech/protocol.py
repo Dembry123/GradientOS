@@ -115,12 +115,25 @@ def ping(ser: serial.Serial, servo_id: int) -> bool:
         with _SERIAL_LOCK:
             ser.reset_input_buffer()
             ser.write(ping_command)
-            # Expected response: [0xFF, 0xFF, ID, Length=2, Error=0, Checksum]
-            response = ser.read(6)
+            # CH340-style half-duplex adapters can echo the transmitted PING
+            # before the servo status packet. Read a wider window and skip the
+            # exact echoed command.
+            time.sleep(0.005)
+            response = ser.read(24)
 
-        if len(response) == 6 and response[0] == 0xFF and response[1] == 0xFF and response[2] == servo_id:
-            _present_servo_ids.add(servo_id)
-            return True
+        for idx in range(max(0, len(response) - 5)):
+            frame = bytes(response[idx : idx + 6])
+            if (
+                len(frame) == 6
+                and frame[0] == config.SERVO_HEADER
+                and frame[1] == config.SERVO_HEADER
+                and frame[2] == servo_id
+                and calculate_checksum(bytearray(frame[2:5])) == frame[5]
+            ):
+                if frame == bytes(ping_command):
+                    continue
+                _present_servo_ids.add(servo_id)
+                return True
         return False
 
     except Exception as e:
@@ -540,16 +553,16 @@ def sync_read_positions(
                 if response_id not in expected_ids:
                     continue
 
-                # Check error byte
-                if pkt[4] != 0:
-                    if alert_callback:
-                        names = config.names_for_status_bits(pkt[4])
-                        alert_callback(response_id, pkt[4], names)
-                    continue
-
                 # Validate checksum
                 if calculate_checksum(pkt[2:7]) != pkt[7]:
                     continue
+
+                # A servo can report an active status bit (for example
+                # overload) while still returning a valid position payload.
+                # Keep the feedback and surface the status separately.
+                if pkt[4] != 0 and alert_callback:
+                    names = config.names_for_status_bits(pkt[4])
+                    alert_callback(response_id, pkt[4], names)
 
                 # Extract position (signed 16-bit, little-endian)
                 position = int.from_bytes(pkt[5:7], byteorder='little', signed=True)
@@ -653,12 +666,11 @@ def sync_read_block(
                 pkt = response_data[i : i + per_packet]
                 sid = pkt[2]
                 if sid in expected_ids:
-                    if pkt[4] == 0:
-                        if calculate_checksum(pkt[2:(2 + 1 + 1 + 1 + data_len)]) == pkt[-1]:
-                            results[sid] = bytes(pkt[5 : 5 + data_len])
-                            expected_ids.discard(sid)
-                            i += per_packet
-                            continue
+                    if calculate_checksum(pkt[2:(2 + 1 + 1 + 1 + data_len)]) == pkt[-1]:
+                        results[sid] = bytes(pkt[5 : 5 + data_len])
+                        expected_ids.discard(sid)
+                        i += per_packet
+                        continue
                 i += 1
             else:
                 i += 1
@@ -821,4 +833,3 @@ def write_angle_limits(
     # 3. Re-lock EEPROM
     write_register_byte(ser, servo_id, config.SERVO_ADDR_WRITE_LOCK, 1)
     return True
-

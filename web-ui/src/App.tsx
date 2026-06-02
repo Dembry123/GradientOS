@@ -35,6 +35,7 @@ import { resolveDefaultApiHost, resolveDefaultVisionHost } from "./useEndpoint";
 import {
   ArmVisualizer,
   type ArmVisualizerHandle,
+  type PhonePoseTelemetry,
   type StepLoadStatus,
   type TopologyEdgeOverlay,
   type StepTransform,
@@ -75,6 +76,23 @@ type ServoSample = {
   led_alarm_bits?: string;
 };
 
+type JogIkTelemetry = {
+  status?: string;
+  reason?: string;
+  updated_at?: number;
+  successes_total?: number;
+  failures_total?: number;
+  consecutive_failures?: number;
+  is_jogging?: boolean;
+  deadman?: boolean;
+  command_age_s?: number;
+  position_step_m?: number;
+  dt_s?: number;
+  command_linear_m_s?: number[];
+  command_angular_deg_s?: number[];
+  q_delta_rad?: number[];
+};
+
 type TelemetryEvent = {
   timestamp: number;
   raw: string;
@@ -84,6 +102,7 @@ type TelemetryEvent = {
   alerts?: Alert[];
   weld_active?: boolean;
   weld_type?: string;
+  jog_ik?: JogIkTelemetry;
 };
 
 type PersistedSettings = {
@@ -100,7 +119,61 @@ type PersistedSettings = {
   selectedProgramNodeId: string | null;
 };
 
-type SidebarPanelId = "step" | "trajectory" | "weld" | "telemetry";
+function formatJogIkStatus(status?: string): string {
+  switch (status) {
+    case "ok":
+      return "IK solving";
+    case "ik_failed":
+      return "IK failed";
+    case "fk_failed":
+      return "FK failed";
+    case "apply_failed":
+      return "Command failed";
+    case "holding":
+      return "Holding";
+    case "timeout_zeroed":
+      return "Timed out";
+    case "deadman_released":
+      return "B1 released";
+    case "paused":
+      return "Paused";
+    case "starting":
+      return "Starting";
+    case "stopped":
+      return "Stopped";
+    default:
+      return status ? status.replace(/_/g, " ") : "No jog data";
+  }
+}
+
+function jogIkStatusTone(status?: string, consecutiveFailures = 0): string {
+  if (status === "ik_failed" || status === "fk_failed" || status === "apply_failed" || consecutiveFailures > 0) {
+    return "border-rose-400/50 bg-rose-500/10 text-rose-100";
+  }
+  if (status === "ok") {
+    return "border-emerald-400/50 bg-emerald-500/10 text-emerald-100";
+  }
+  if (status === "holding" || status === "timeout_zeroed") {
+    return "border-amber-300/45 bg-amber-400/10 text-amber-100";
+  }
+  return "border-slate-500/50 bg-slate-800/55 text-slate-200";
+}
+
+function vectorNorm(values?: number[]): number | null {
+  if (!Array.isArray(values) || values.length === 0) {
+    return null;
+  }
+  let sum = 0;
+  for (const value of values) {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    sum += value * value;
+  }
+  return Math.sqrt(sum);
+}
+
+type SidebarPanelId = "step" | "trajectory" | "weld" | "telemetry" | "phone";
 
 type TopologyModel = {
   model_id: string;
@@ -281,6 +354,7 @@ function loadPersistedSettings(): PersistedSettings {
           parsed.activePanel === "trajectory" ||
           parsed.activePanel === "weld" ||
           parsed.activePanel === "telemetry" ||
+          parsed.activePanel === "phone" ||
           parsed.activePanel === null
             ? parsed.activePanel
             : defaults.activePanel,
@@ -793,6 +867,11 @@ function findWeldProgramNodeIdByEdge(
 }
 
 function TelemetryPanel({ latest }: { latest: TelemetryEvent | null }) {
+  const jogIk = latest?.jog_ik;
+  const jogFailures = jogIk?.consecutive_failures ?? 0;
+  const linearRate = vectorNorm(jogIk?.command_linear_m_s);
+  const angularRate = vectorNorm(jogIk?.command_angular_deg_s);
+  const qStep = vectorNorm(jogIk?.q_delta_rad);
   return (
     <div className="pointer-events-auto w-full">
       {latest ? (
@@ -825,12 +904,126 @@ function TelemetryPanel({ latest }: { latest: TelemetryEvent | null }) {
               {latest.gripper.toFixed(3)}
             </div>
           )}
+          <div className={`rounded-md border px-3 py-2 ${jogIkStatusTone(jogIk?.status, jogFailures)}`}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-semibold uppercase tracking-[0.18em]">
+                Jog IK
+              </span>
+              <span className="text-sm font-semibold">
+                {formatJogIkStatus(jogIk?.status)}
+              </span>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+              <span className="text-slate-300/80">B1</span>
+              <span>{jogIk?.deadman ? "held" : "released"}</span>
+              <span className="text-slate-300/80">fail streak</span>
+              <span>{jogFailures}</span>
+              <span className="text-slate-300/80">fails total</span>
+              <span>{jogIk?.failures_total ?? 0}</span>
+              <span className="text-slate-300/80">linear cmd</span>
+              <span>{linearRate === null ? "n/a" : `${linearRate.toFixed(3)} m/s`}</span>
+              <span className="text-slate-300/80">angular cmd</span>
+              <span>{angularRate === null ? "n/a" : `${angularRate.toFixed(1)} deg/s`}</span>
+              {typeof jogIk?.position_step_m === "number" && (
+                <>
+                  <span className="text-slate-300/80">step</span>
+                  <span>{(jogIk.position_step_m * 1000).toFixed(1)} mm</span>
+                </>
+              )}
+              {qStep !== null && (
+                <>
+                  <span className="text-slate-300/80">joint step</span>
+                  <span>{((qStep * 180) / Math.PI).toFixed(2)} deg</span>
+                </>
+              )}
+            </div>
+            {jogIk?.reason && (
+              <div className="mt-2 border-t border-white/10 pt-2 text-xs text-slate-200/80">
+                {jogIk.reason}
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         <p className="text-sm text-slate-300/80">
           No telemetry yet. Connect to the API and start streaming.
         </p>
       )}
+    </div>
+  );
+}
+
+function formatTeleopVector(
+  value?: { x: number; y: number; z: number },
+  digits = 3,
+) {
+  if (!value) {
+    return "n/a";
+  }
+  return `${value.x.toFixed(digits)}, ${value.y.toFixed(digits)}, ${value.z.toFixed(digits)}`;
+}
+
+function PhoneFramePanel({ phonePose }: { phonePose: PhonePoseTelemetry | null }) {
+  const age = typeof phonePose?.age_s === "number" ? phonePose.age_s : null;
+  const isFresh = Boolean(phonePose && (age === null || age < 2));
+  return (
+    <div className="flex flex-col gap-4 text-[13px] text-slate-200">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Pose</div>
+          <div className={isFresh ? "mt-1 font-semibold text-emerald-200" : "mt-1 font-semibold text-slate-400"}>
+            {isFresh ? "Receiving" : "Waiting"}
+          </div>
+        </div>
+        <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">B1</div>
+          <div className={phonePose?.enabled ? "mt-1 font-semibold text-cyan-200" : "mt-1 font-semibold text-slate-400"}>
+            {phonePose?.enabled ? "Held" : "Released"}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Delta X Y Z</div>
+        <div className="mt-1 font-mono text-[12px] text-slate-100">
+          {formatTeleopVector(phonePose?.delta_m)}
+        </div>
+      </div>
+
+      <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Euler X Y Z</div>
+        <div className="mt-1 font-mono text-[12px] text-slate-100">
+          {formatTeleopVector(phonePose?.orientation_euler_deg, 1)}
+        </div>
+      </div>
+
+      <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Phone Marker X Y Z</div>
+        <div className="mt-1 font-mono text-[12px] text-slate-100">
+          {formatTeleopVector(phonePose?.visual_position_m)}
+        </div>
+      </div>
+
+      <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Phone Marker R P Y</div>
+        <div className="mt-1 font-mono text-[12px] text-slate-100">
+          {formatTeleopVector(phonePose?.visual_orientation_euler_deg, 1)}
+        </div>
+      </div>
+
+      <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Command Target X Y Z</div>
+        <div className="mt-1 font-mono text-[12px] text-slate-100">
+          {formatTeleopVector(phonePose?.target_position_m ?? phonePose?.target_linear_m)}
+        </div>
+      </div>
+
+      <div className="rounded border border-slate-700/70 bg-slate-950/45 p-2">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Source</div>
+        <div className="mt-1 break-all font-mono text-[12px] text-slate-100">
+          {phonePose?.source ?? "n/a"}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2003,6 +2196,7 @@ export default function App() {
   const [settings, setSettings] = useState<PersistedSettings>(() => loadPersistedSettings());
   const [isConnected, setIsConnected] = useState(false);
   const [latest, setLatest] = useState<TelemetryEvent | null>(null);
+  const [phonePose, setPhonePose] = useState<PhonePoseTelemetry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visionError, setVisionError] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -2073,6 +2267,43 @@ export default function App() {
     () => `${normalisedVisionHost}/stream.mjpg`,
     [normalisedVisionHost],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    let timeoutId: number | null = null;
+
+    const pollPhonePose = async () => {
+      try {
+        const response = await fetch(`${normalizedApiHost}/teleop/phone-pose`, {
+          method: "GET",
+          cache: "no-store",
+        });
+        if (!cancelled && response.ok) {
+          const payload = (await response.json()) as PhonePoseTelemetry;
+          setPhonePose(payload.status === "ok" ? payload : null);
+        } else if (!cancelled && !response.ok) {
+          setPhonePose(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setPhonePose(null);
+        }
+      } finally {
+        if (!cancelled) {
+          timeoutId = window.setTimeout(pollPhonePose, 120);
+        }
+      }
+    };
+
+    pollPhonePose();
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [normalizedApiHost]);
+
   const visualWaypoints =
     plannerPoints.length > 0
       ? plannerPoints
@@ -2265,6 +2496,7 @@ export default function App() {
       { id: "trajectory", label: "Trajectory", icon: <Route size={17} />, shortcut: "2" },
       { id: "weld", label: "Weld", icon: <Flame size={17} />, shortcut: "3" },
       { id: "telemetry", label: "Live Charts", icon: <Camera size={17} />, shortcut: "4" },
+      { id: "phone", label: "Phone Frame", icon: <Crosshair size={17} />, shortcut: "5" },
     ],
     [],
   );
@@ -2293,6 +2525,7 @@ export default function App() {
     eventSourceRef.current = null;
     setIsConnected(false);
     setLatest(null);
+    setPhonePose(null);
     setIsVisionActive(false);
     setVisionError(null);
     setPreviewPlan(null);
@@ -2329,6 +2562,7 @@ export default function App() {
     let parsedAlerts: Alert[] | undefined;
     let weldActiveValue: boolean | undefined;
     let weldTypeValue: string | undefined;
+    let jogIkValue: JogIkTelemetry | undefined;
     let sourceTimeSec: number | undefined;
 
     try {
@@ -2382,6 +2616,9 @@ export default function App() {
         if (typeof maybeObj.weld_type === "string" && maybeObj.weld_type.trim()) {
           weldTypeValue = maybeObj.weld_type.trim();
         }
+        if (maybeObj.jog_ik && typeof maybeObj.jog_ik === "object") {
+          jogIkValue = maybeObj.jog_ik as JogIkTelemetry;
+        }
       }
     } catch {
       // fall back to raw payload only
@@ -2396,6 +2633,7 @@ export default function App() {
       alerts: parsedAlerts,
       weld_active: weldActiveValue,
       weld_type: weldTypeValue,
+      jog_ik: jogIkValue,
     };
 
     const candidateTimeSec = sourceTimeSec ?? next.timestamp / 1000;
@@ -3293,24 +3531,56 @@ export default function App() {
     if (isStopping) {
       return;
     }
-    const stopEndpoint = `${normalizedApiHost}/control/stop`;
     setIsStopping(true);
     try {
-      const response = await fetch(stopEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      if (!response.ok) {
-        let detail = `${response.status} ${response.statusText}`;
+      const failures: string[] = [];
+      const postStopAction = async (
+        path: string,
+        body?: Record<string, unknown>,
+        required = false,
+      ) => {
         try {
-          const parsed = await response.json();
-          if (typeof parsed?.detail === "string") {
-            detail = parsed.detail;
+          const response = await fetch(`${normalizedApiHost}${path}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: body ? JSON.stringify(body) : undefined,
+          });
+          if (!response.ok) {
+            let detail = `${response.status} ${response.statusText}`;
+            try {
+              const parsed = await response.json();
+              if (typeof parsed?.detail === "string") {
+                detail = parsed.detail;
+              }
+            } catch {
+              // ignore parse error, keep default detail
+            }
+            throw new Error(detail);
           }
-        } catch {
-          // ignore parse error, keep default detail
+        } catch (err) {
+          const message = `${path}: ${(err as Error).message ?? "Unknown error"}`;
+          failures.push(message);
+          if (required) {
+            throw new Error(message);
+          }
         }
-        throw new Error(detail);
+      };
+
+      await postStopAction("/control/jog/deadman", { enabled: false });
+      await postStopAction("/control/jog/velocity", {
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        v_roll: 0,
+        v_pitch: 0,
+        v_yaw: 0,
+      });
+      await postStopAction("/control/jog/gripper-velocity", { rate_deg_s: 0 });
+      await postStopAction("/control/jog/stop");
+      await postStopAction("/control/stop", undefined, true);
+
+      if (failures.length > 0) {
+        setError(`STOP sent, but some pre-stop safety calls failed: ${failures.join("; ")}`);
       }
     } catch (err) {
       setError(
@@ -3514,6 +3784,7 @@ export default function App() {
         "2": "trajectory",
         "3": "weld",
         "4": "telemetry",
+        "5": "phone",
       };
       if (panelByKey[key]) {
         const nextPanel = panelByKey[key];
@@ -3585,6 +3856,8 @@ export default function App() {
   const alertTone = error ? "rose" : "amber";
   const activeDrawerWidthClass = activePanel === "telemetry"
     ? "w-[30rem] max-w-[calc(100vw-7rem)]"
+    : activePanel === "phone"
+      ? "w-[22rem] max-w-[calc(100vw-7rem)]"
     : "w-[20rem] max-w-[calc(100vw-7rem)]";
   const activeDrawerHeightMode = activePanel === "weld" ? "full" : "content";
   const activeDrawerHeader = activePanel === "step"
@@ -3618,6 +3891,12 @@ export default function App() {
                 Live Charts
               </span>
             )
+          : activePanel === "phone"
+            ? (
+                <span className="text-xs font-semibold uppercase tracking-[0.25em] text-cyan-200/80">
+                  Phone Frame
+                </span>
+              )
           : null;
   const activeDrawerContent = activePanel === "step"
     ? (
@@ -3823,6 +4102,8 @@ export default function App() {
           )
         : activePanel === "telemetry"
           ? <TelemetryCharts latest={latest} />
+        : activePanel === "phone"
+          ? <PhoneFramePanel phonePose={phonePose} />
         : null;
 
   return (
@@ -3962,6 +4243,8 @@ export default function App() {
         <ArmVisualizer
           ref={visualizerRef}
           joints={latest?.joints}
+          jogIk={latest?.jog_ik}
+          phonePose={phonePose}
           showBoundingBox={showBoundingBox}
           selectionMode={isPlanning && !isPlanLoading}
           onPointSelected={handlePointSelected}

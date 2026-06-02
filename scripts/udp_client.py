@@ -18,13 +18,17 @@ UDP_PORT = 3000
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 PI_RESOLVED_IP = ""
 
-try:
-    PI_RESOLVED_IP = socket.gethostbyname(PI_IP)
-    print(f"UDP Client configured for Pi at {PI_IP} ({PI_RESOLVED_IP}):{UDP_PORT}")
-except socket.gaierror:
-    print(f"CRITICAL: Could not resolve hostname '{PI_IP}'.")
-    print("Please check your network connection, DNS, or use the Pi's direct IP address.")
-    exit()
+
+def _resolve_pi_host():
+    """Resolve PI_IP after argparse has populated it from --pi-ip."""
+    global PI_RESOLVED_IP
+    try:
+        PI_RESOLVED_IP = socket.gethostbyname(PI_IP)
+        print(f"UDP Client configured for Pi at {PI_IP} ({PI_RESOLVED_IP}):{UDP_PORT}")
+    except socket.gaierror:
+        print(f"CRITICAL: Could not resolve hostname '{PI_IP}'.")
+        print("Please check your network connection, DNS, or use the Pi's direct IP address.")
+        raise SystemExit(1)
 
 def send_command(command_str: str):
     """Sends a formatted command string to the robot controller."""
@@ -272,6 +276,7 @@ if __name__ == "__main__":
                         help='The IP address of the Raspberry Pi.')
     args = parser.parse_args()
     PI_IP = args.pi_ip
+    _resolve_pi_host()
 
     # Import numpy for the square test, but don't make it a hard requirement
     # for the whole script.

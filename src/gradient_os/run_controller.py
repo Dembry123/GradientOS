@@ -302,6 +302,9 @@ Examples:
                     weld_type = utils.trajectory_state.get("current_weld_type")
                     if isinstance(weld_type, str) and weld_type:
                         msg["weld_type"] = weld_type
+                    jog_ik_status = utils.trajectory_state.get("jog_ik_status")
+                    if isinstance(jog_ik_status, dict):
+                        msg["jog_ik"] = dict(jog_ik_status)
                     
                     # --- Servo telemetry (voltage/temp/current/torque + alarms) ---
                     now = time.time()

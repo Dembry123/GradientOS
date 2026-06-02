@@ -107,6 +107,7 @@ class FeetechBackend(ActuatorBackend):
         self._present_servo_ids: set[int] = set()
         self._gripper_present = False
         self._current_positions_rad: list[float] = [0.0] * self.num_joints
+        self._has_valid_position_read = False
         self._current_gripper_rad: float = 0.0
         
         # Build mapping ranges for each physical servo
@@ -306,12 +307,20 @@ class FeetechBackend(ActuatorBackend):
             arm_servo_ids,
             alert_callback=self._alert_callback,
         )
+
+        if not raw_positions:
+            if self._has_valid_position_read:
+                print("[Feetech] WARNING: Position SyncRead returned no arm data; keeping last known joint positions.")
+            else:
+                print("[Feetech] WARNING: Position SyncRead returned no arm data before any valid read.")
+            return list(self._current_positions_rad)
         
         # Convert to logical joint angles
         positions = self.raw_to_joint_positions(raw_positions)
         
         # Update internal state
         self._current_positions_rad = positions
+        self._has_valid_position_read = True
         
         if verbose:
             angles_deg = np.rad2deg(positions)
@@ -437,7 +446,9 @@ class FeetechBackend(ActuatorBackend):
         Returns:
             List of joint angles in radians.
         """
-        positions = [0.0] * self.num_joints
+        # Preserve the previous value for joints missing from a partial read. This
+        # prevents a single bus dropout from publishing a fake home pose.
+        positions = list(self._current_positions_rad)
         
         for logical_idx, physical_indices in self._logical_to_physical_map.items():
             angles = []
@@ -884,4 +895,3 @@ class FeetechBackend(ActuatorBackend):
         except Exception as e:
             print(f"[Feetech] Probe skipped {path}: {e}")
             return False
-

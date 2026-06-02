@@ -36,6 +36,7 @@ gradient-controller = "gradient_os.run_controller:main"
 gradient-cli = "gradient_os.cli_controller:main"
 gradient-vision = "gradient_os.vision.cli:main"
 gradient-api = "gradient_os.api.main:main"
+gradient-iphone-hebi-teleop = "gradient_os.teleop.hebi_mobile_io_bridge:main"
 
 [project.optional-dependencies]
 core = [
@@ -74,6 +75,9 @@ ai = [
 ]
 datasets = [
     "lerobot",
+]
+phone = [
+    "hebi-py>=2.7.3",
 ]
 dev = [
     "pytest==8.4.2",

@@ -268,7 +268,7 @@ def parse_telemetry_block2(data: bytes) -> dict:
     status_byte = int(data[0])
     result["status_byte"] = status_byte
     result["status_bits"] = bits_to_string(status_byte)
-    result["status_names"] = names_for_alarm_bits(status_byte)
+    result["status_names"] = names_for_status_bits(status_byte)
     
     # Current: signed 16-bit, scale to amps
     current_raw = int.from_bytes(data[3:5], "little", signed=True)
@@ -303,4 +303,3 @@ def parse_telemetry_block3(data: bytes) -> dict:
     result["led_alarm_names"] = names_for_alarm_bits(led)
     
     return result
-

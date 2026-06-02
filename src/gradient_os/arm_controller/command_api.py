@@ -815,6 +815,43 @@ def handle_run_trajectory(trajectory_name: str, use_cache: bool = False, loop_ov
     
     print("[Pi Trajectory] Trajectory thread started. Main loop is responsive.")
 
+def _force_stop_jog_controller(join_timeout_s: float = 0.5):
+    """Drop all realtime jog state so STOP cannot be overridden by stale jog input."""
+    utils.trajectory_state["is_jogging"] = False
+    utils.trajectory_state["jog_deadman"] = False
+    utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
+    utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    _update_jog_ik_status("stopped", "jog force-stopped")
+
+    thread = utils.trajectory_state.get("jog_thread")
+    if thread and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=join_timeout_s)
+    if utils.trajectory_state.get("jog_thread") is thread:
+        utils.trajectory_state["jog_thread"] = None
+
+
+def _brake_to_current_position(reason: str) -> bool:
+    current_angles = servo_driver.get_current_arm_state_rad(verbose=False)
+    if current_angles:
+        print(f"[Jog] Brake to current position ({reason}): {np.round(current_angles, 3)}")
+        servo_driver.set_servo_positions(current_angles, 0, 100)
+        _write_jog_diag(
+            "brake",
+            force=utils.trajectory_state.get("jog_debug", False),
+            reason=reason,
+            actual_joint_angles_rad=current_angles,
+        )
+        return True
+
+    print(f"[Jog] WARNING: Could not read current position for brake ({reason}).")
+    _write_jog_diag(
+        "brake_failed",
+        force=True,
+        reason=reason,
+    )
+    return False
+
+
 def handle_stop_command():
     """
     Stops any currently running motion by setting a global flag and sending
@@ -824,16 +861,11 @@ def handle_stop_command():
     # Set the flag to stop any high-level trajectory loops
     utils.trajectory_state["should_stop"] = True
     utils.trajectory_state["weld_active"] = False
+    utils.trajectory_state["current_weld_type"] = None
+    _force_stop_jog_controller()
 
-    # Also send an immediate brake command to the physical servos
-    # by commanding them to their current position with zero speed.
-    current_angles = servo_driver.get_current_arm_state_rad(verbose=False)
-    if current_angles:
-        print(f"[Controller] Sending immediate brake command to current position: {np.round(current_angles, 2)}")
-        # Use speed 0 and max acceleration to act as a hard stop
-        servo_driver.set_servo_positions(current_angles, 0, 100)
-    else:
-        print("[Controller] WARNING: Could not get current position to send brake command.")
+    _brake_to_current_position("STOP command")
+    _close_jog_diag_log()
 
 
 def handle_move_to_position_absolute(x: float, y: float, z: float):
@@ -1134,6 +1166,185 @@ JOG_VELOCITY_TIMEOUT_S = 0.5  # If no command received in this time, stop
 MAX_JOG_LINEAR_M_S = 0.2      # Safety cap per-axis
 MAX_JOG_ANGULAR_DEG_S = 180.0 # Safety cap per-axis
 MAX_GRIPPER_JOG_DEG_S = 90.0 # Safety cap for gripper rotation rate
+JOG_LINEAR_HOLD_EPS_M_S = 1e-5
+JOG_ANGULAR_HOLD_EPS_DEG_S = 0.02
+JOG_MAX_JOINT_STEP_RAD = 0.35
+JOG_DIAG_SERVO_SAMPLE_INTERVAL = 5
+
+
+def _jog_json_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return _jog_json_safe(value.tolist())
+    if isinstance(value, (list, tuple)):
+        return [_jog_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jog_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (np.floating, float)):
+        return round(float(value), 8)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (bool, str)):
+        return value
+    return str(value)
+
+
+def _ensure_jog_diag_log():
+    handle = utils.trajectory_state.get("jog_diag_file")
+    if handle and not getattr(handle, "closed", True):
+        return handle
+
+    diag_dir = os.path.join("diagnostics", "jog_motion")
+    os.makedirs(diag_dir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(diag_dir, f"jog_motion_{stamp}.jsonl")
+    handle = open(path, "a", buffering=8192)
+    utils.trajectory_state["jog_diag_file"] = handle
+    utils.trajectory_state["jog_diag_path"] = path
+    utils.trajectory_state["jog_diag_count"] = 0
+    print(f"[Jog] Diagnostic JSONL log -> {path}")
+    return handle
+
+
+def _close_jog_diag_log() -> None:
+    handle = utils.trajectory_state.get("jog_diag_file")
+    if handle and not getattr(handle, "closed", True):
+        try:
+            handle.flush()
+            handle.close()
+        except Exception:
+            pass
+    utils.trajectory_state["jog_diag_file"] = None
+
+
+def _write_jog_diag(event: str, *, force: bool = False, **fields) -> None:
+    if not force and not utils.trajectory_state.get("jog_debug", False):
+        return
+    try:
+        handle = _ensure_jog_diag_log()
+        payload = {
+            "time": round(time.time(), 6),
+            "event": event,
+            **{key: _jog_json_safe(value) for key, value in fields.items()},
+        }
+        handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        count = int(utils.trajectory_state.get("jog_diag_count", 0)) + 1
+        utils.trajectory_state["jog_diag_count"] = count
+        if force or count % 25 == 0:
+            handle.flush()
+    except Exception as exc:
+        print(f"[Jog] WARNING: Failed to write diagnostic log: {exc}")
+
+
+def _nearest_limited_joint_target(q_current, q_target):
+    q_current_arr = np.asarray(q_current, dtype=float)
+    q_target_arr = np.asarray(q_target, dtype=float)
+    delta = (q_target_arr - q_current_arr + np.pi) % (2.0 * np.pi) - np.pi
+    q_nearest = q_current_arr + delta
+
+    limits = np.array(utils.LOGICAL_JOINT_LIMITS_RAD, dtype=float)
+    mins = limits[:, 0]
+    maxs = limits[:, 1]
+    q_limited = np.clip(q_nearest, mins, maxs)
+    wrapped = np.abs(q_nearest - q_target_arr) > 1e-6
+    limited = np.abs(q_limited - q_nearest) > 1e-6
+    return q_limited, wrapped, limited
+
+
+def _jog_status_vector(values, ndigits: int = 5):
+    if values is None:
+        return None
+    try:
+        arr = np.asarray(values, dtype=float).reshape(-1)
+    except Exception:
+        return None
+    if not np.all(np.isfinite(arr)):
+        return None
+    return [round(float(value), ndigits) for value in arr]
+
+
+def _update_jog_ik_status(status: str, reason: str = "", **fields):
+    """Store JSON-safe realtime jog/IK diagnostics for telemetry clients."""
+    previous = utils.trajectory_state.get("jog_ik_status")
+    if not isinstance(previous, dict):
+        previous = {}
+
+    success_count = int(previous.get("successes_total", 0))
+    failure_count = int(previous.get("failures_total", 0))
+    consecutive_failures = int(previous.get("consecutive_failures", 0))
+
+    if status == "ok":
+        success_count += 1
+        consecutive_failures = 0
+    elif status in {"ik_failed", "fk_failed", "apply_failed", "joint_jump_rejected"}:
+        failure_count += 1
+        consecutive_failures += 1
+    elif status in {"starting", "stopped"}:
+        consecutive_failures = 0
+
+    payload = {
+        "status": status,
+        "reason": reason,
+        "updated_at": time.time(),
+        "successes_total": success_count,
+        "failures_total": failure_count,
+        "consecutive_failures": consecutive_failures,
+        "is_jogging": bool(utils.trajectory_state.get("is_jogging", False)),
+        "deadman": bool(utils.trajectory_state.get("jog_deadman", False)),
+    }
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, np.ndarray):
+            coerced = _jog_status_vector(value)
+            if coerced is not None:
+                payload[key] = coerced
+        elif isinstance(value, (list, tuple)):
+            coerced = _jog_status_vector(value)
+            if coerced is not None:
+                payload[key] = coerced
+        elif isinstance(value, (np.floating, float)):
+            payload[key] = round(float(value), 6)
+        elif isinstance(value, (np.integer, int)):
+            payload[key] = int(value)
+        elif isinstance(value, (bool, str)):
+            payload[key] = value
+    utils.trajectory_state["jog_ik_status"] = payload
+
+
+def _apply_jog_gripper_velocity(dt: float) -> bool:
+    """Apply gripper-only jog velocity without forcing an arm IK command."""
+    try:
+        if not utils.gripper_present:
+            return False
+        rate_deg_s = float(utils.trajectory_state.get("jog_gripper_velocity_deg_s", 0.0))
+        rate_deg_s = float(np.clip(rate_deg_s, -MAX_GRIPPER_JOG_DEG_S, MAX_GRIPPER_JOG_DEG_S))
+        if abs(rate_deg_s) <= 1e-3:
+            return False
+
+        current_deg = float(np.rad2deg(utils.current_gripper_angle_rad))
+        target_deg = current_deg + rate_deg_s * dt
+        min_rad, max_rad = utils.GRIPPER_LIMITS_RAD
+        target_rad_unclamped = float(np.deg2rad(target_deg))
+        target_rad = float(np.clip(target_rad_unclamped, min_rad, max_rad))
+        if abs(target_rad - target_rad_unclamped) > 1e-6:
+            print("[Jog] NOTE: Gripper target clamped to limits.")
+
+        speed_scaled = max(100, min(800, int(abs(rate_deg_s) * 4 + 100)))
+        servo_driver.set_single_servo_position_rads(
+            servo_id=utils.SERVO_ID_GRIPPER,
+            position_rad=target_rad,
+            speed=speed_scaled,
+            accel=0,
+        )
+        utils.current_gripper_angle_rad = target_rad
+        return True
+    except Exception as e:
+        print(f"[Jog] WARNING: Gripper jog update failed: {e}")
+        _update_jog_ik_status("apply_failed", f"gripper jog update failed: {e}")
+        return False
+
 
 def _jog_controller_thread():
     """
@@ -1161,6 +1372,7 @@ def _jog_controller_thread():
         # When the motion ends, resync q_current from the physical robot so we do not
         # "snap back" to stale internal state.
         if utils.trajectory_state.get("is_running"):
+            _update_jog_ik_status("paused", "non-jog motion active")
             was_paused_for_motion = True
             loop_duration = time.monotonic() - loop_start_time
             sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
@@ -1180,9 +1392,15 @@ def _jog_controller_thread():
         time_since_last_cmd = time.monotonic() - utils.trajectory_state["last_jog_command_time"]
         if time_since_last_cmd > JOG_VELOCITY_TIMEOUT_S:
             utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
+            utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
             if not timeout_zero_logged:
                 print(f"[Jog] Timeout {time_since_last_cmd:.3f}s > {JOG_VELOCITY_TIMEOUT_S:.2f}s; zeroing jog velocities.")
                 timeout_zero_logged = True
+            _update_jog_ik_status(
+                "timeout_zeroed",
+                "no recent jog velocity command",
+                command_age_s=time_since_last_cmd,
+            )
         else:
             timeout_zero_logged = False
 
@@ -1190,6 +1408,7 @@ def _jog_controller_thread():
         current_pose_matrix = ik_solver.get_fk_matrix(q_current)
         if current_pose_matrix is None:
             print("[Jog] ERROR: FK failed during jog loop. Stopping.")
+            _update_jog_ik_status("fk_failed", "FK failed for current jog state")
             break
         
         current_position = current_pose_matrix[:3, 3]
@@ -1203,7 +1422,8 @@ def _jog_controller_thread():
         
         # 2. Get target velocities from global state (respect deadman gate)
         velocities = utils.trajectory_state["jog_velocities"]
-        if not utils.trajectory_state.get("jog_deadman", False):
+        deadman_held = bool(utils.trajectory_state.get("jog_deadman", False))
+        if not deadman_held:
             # If deadman not held, force zero velocities (gripper included)
             if utils.trajectory_state.get("jog_debug", False):
                 print("[Jog] Deadman not held → zeroing velocities.")
@@ -1213,6 +1433,43 @@ def _jog_controller_thread():
         linear_vel = np.clip(velocities[:3], -MAX_JOG_LINEAR_M_S, MAX_JOG_LINEAR_M_S)
         angular_deg_s = np.clip(velocities[3:], -MAX_JOG_ANGULAR_DEG_S, MAX_JOG_ANGULAR_DEG_S)
         angular_vel_rad_s = np.deg2rad(angular_deg_s) # Convert RPY rates to radians
+
+        gripper_rate_deg_s = float(utils.trajectory_state.get("jog_gripper_velocity_deg_s", 0.0))
+        has_arm_motion_command = (
+            float(np.linalg.norm(linear_vel)) > JOG_LINEAR_HOLD_EPS_M_S
+            or float(np.linalg.norm(angular_deg_s)) > JOG_ANGULAR_HOLD_EPS_DEG_S
+        )
+        has_gripper_motion_command = abs(gripper_rate_deg_s) > 1e-3
+        if not deadman_held or (not has_arm_motion_command and not has_gripper_motion_command):
+            _update_jog_ik_status(
+                "deadman_released" if not deadman_held else "holding",
+                "deadman released" if not deadman_held else "zero velocity command",
+                command_linear_m_s=linear_vel,
+                command_angular_deg_s=angular_deg_s,
+                command_age_s=time_since_last_cmd,
+            )
+            loop_duration = time.monotonic() - loop_start_time
+            sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            continue
+
+        if has_gripper_motion_command:
+            _apply_jog_gripper_velocity(dt)
+
+        if not has_arm_motion_command:
+            _update_jog_ik_status(
+                "holding",
+                "gripper-only jog; arm command held",
+                command_linear_m_s=linear_vel,
+                command_angular_deg_s=angular_deg_s,
+                command_age_s=time_since_last_cmd,
+            )
+            loop_duration = time.monotonic() - loop_start_time
+            sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            continue
         
         # 3. Calculate target pose for this time step
         # Integrate linear velocity to get new position
@@ -1242,59 +1499,120 @@ def _jog_controller_thread():
         if q_target is not None:
             # 5. Enforce logical joint limits before commanding
             try:
-                q_arr = np.array(q_target, dtype=float)
-                limits = np.array(utils.LOGICAL_JOINT_LIMITS_RAD, dtype=float)
-                mins = limits[:, 0]
-                maxs = limits[:, 1]
-                q_clamped = np.clip(q_arr, mins, maxs)
-                if not np.allclose(q_arr, q_clamped, atol=1e-6):
-                    clamped_idx = np.where(np.abs(q_arr - q_clamped) > 1e-6)[0].tolist()
-                    print(f"[Jog] NOTE: IK target clamped at joints: {clamped_idx}")
+                q_clamped, wrapped_idx_mask, limited_idx_mask = _nearest_limited_joint_target(
+                    q_current,
+                    q_target,
+                )
+                if np.any(wrapped_idx_mask) and utils.trajectory_state.get("jog_debug", False):
+                    wrapped_idx = np.where(wrapped_idx_mask)[0].tolist()
+                    print(f"[Jog] NOTE: IK target unwrapped at joints: {wrapped_idx}")
+                if np.any(limited_idx_mask):
+                    limited_idx = np.where(limited_idx_mask)[0].tolist()
+                    print(f"[Jog] NOTE: IK target limited at joints: {limited_idx}")
                 if utils.trajectory_state.get("jog_debug", False):
                     dq = q_clamped - q_current
                     print(f"[Jog] q_delta(rad)={np.round(dq, 5)} | lin={np.round(linear_vel,4)} m/s, ang={np.round(angular_deg_s,1)} deg/s, dt={dt:.4f}s")
                 # 6. Command servos to the clamped angles. High speed, zero accel for responsiveness.
+                q_delta = q_clamped - q_current
+                max_abs_step = float(np.max(np.abs(q_delta)))
+                if max_abs_step > JOG_MAX_JOINT_STEP_RAD:
+                    print(
+                        "[Jog] WARNING: Rejecting IK jog step with large joint jump "
+                        f"{max_abs_step:.3f} rad."
+                    )
+                    actual_angles = servo_driver.get_current_arm_state_rad(verbose=False)
+                    _write_jog_diag(
+                        "joint_jump_rejected",
+                        force=True,
+                        current_position_m=current_position,
+                        target_position_m=target_position,
+                        command_linear_m_s=linear_vel,
+                        command_angular_deg_s=angular_deg_s,
+                        q_current_rad=q_current,
+                        q_target_raw_rad=q_target,
+                        q_target_limited_rad=q_clamped,
+                        q_delta_rad=q_delta,
+                        actual_joint_angles_rad=actual_angles,
+                        dt_s=dt,
+                        command_age_s=time_since_last_cmd,
+                    )
+                    _update_jog_ik_status(
+                        "joint_jump_rejected",
+                        "IK solution would command an unsafe joint jump",
+                        current_position_m=current_position,
+                        target_position_m=target_position,
+                        command_linear_m_s=linear_vel,
+                        command_angular_deg_s=angular_deg_s,
+                        q_delta_rad=q_delta,
+                        dt_s=dt,
+                        command_age_s=time_since_last_cmd,
+                    )
+                    loop_duration = time.monotonic() - loop_start_time
+                    sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    continue
+
                 servo_driver.set_servo_positions(q_clamped, 800, 0)
+                actual_angles = None
+                diag_count = int(utils.trajectory_state.get("jog_diag_sample_count", 0)) + 1
+                utils.trajectory_state["jog_diag_sample_count"] = diag_count
+                if (
+                    utils.trajectory_state.get("jog_debug", False)
+                    and diag_count % JOG_DIAG_SERVO_SAMPLE_INTERVAL == 0
+                ):
+                    actual_angles = servo_driver.get_current_arm_state_rad(verbose=False)
+                _write_jog_diag(
+                    "ik_step",
+                    current_position_m=current_position,
+                    target_position_m=target_position,
+                    command_linear_m_s=linear_vel,
+                    command_angular_deg_s=angular_deg_s,
+                    q_current_rad=q_current,
+                    q_target_raw_rad=q_target,
+                    q_target_limited_rad=q_clamped,
+                    q_delta_rad=q_delta,
+                    actual_joint_angles_rad=actual_angles,
+                    dt_s=dt,
+                    command_age_s=time_since_last_cmd,
+                )
                 q_current = q_clamped # Update our state for the next iteration's IK
+                _update_jog_ik_status(
+                    "ok",
+                    "IK solved and command applied",
+                    current_position_m=current_position,
+                    target_position_m=target_position,
+                    position_step_m=float(np.linalg.norm(target_position - current_position)),
+                    command_linear_m_s=linear_vel,
+                    command_angular_deg_s=angular_deg_s,
+                    q_delta_rad=q_delta,
+                    dt_s=dt,
+                    command_age_s=time_since_last_cmd,
+                )
             except Exception as e:
                 print(f"[Jog] WARNING: Failed to clamp/apply joint limits: {e}")
+                _update_jog_ik_status("apply_failed", str(e))
         else:
             # If IK fails, we don't command anything and just try again next cycle.
             # This can happen if the target is unreachable.
             print("[Jog] WARNING: IK solution not found for step.")
+            _update_jog_ik_status(
+                "ik_failed",
+                "IK solution not found for jog step",
+                current_position_m=current_position,
+                target_position_m=target_position,
+                position_step_m=float(np.linalg.norm(target_position - current_position)),
+                command_linear_m_s=linear_vel,
+                command_angular_deg_s=angular_deg_s,
+                dt_s=dt,
+                command_age_s=time_since_last_cmd,
+            )
 
         # --- Maintain loop frequency ---
         loop_duration = time.monotonic() - loop_start_time
         sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
         if sleep_time > 0:
             time.sleep(sleep_time)
-
-        # 6. Update gripper if present, integrating jog velocity with safety caps
-        try:
-            if utils.gripper_present:
-                rate_deg_s = float(utils.trajectory_state.get("jog_gripper_velocity_deg_s", 0.0))
-                # Apply backend cap
-                rate_deg_s = float(np.clip(rate_deg_s, -MAX_GRIPPER_JOG_DEG_S, MAX_GRIPPER_JOG_DEG_S))
-                if abs(rate_deg_s) > 1e-3:
-                    current_deg = float(np.rad2deg(utils.current_gripper_angle_rad))
-                    target_deg = current_deg + rate_deg_s * dt
-                    # Clamp to physical limits
-                    min_rad, max_rad = utils.GRIPPER_LIMITS_RAD
-                    target_rad_unclamped = float(np.deg2rad(target_deg))
-                    target_rad = float(np.clip(target_rad_unclamped, min_rad, max_rad))
-                    if abs(target_rad - target_rad_unclamped) > 1e-6:
-                        print("[Jog] NOTE: Gripper target clamped to limits.")
-                    # Choose a reasonable speed scaling from requested rate
-                    speed_scaled = max(100, min(800, int(abs(rate_deg_s) * 4 + 100)))
-                    servo_driver.set_single_servo_position_rads(
-                        servo_id=utils.SERVO_ID_GRIPPER,
-                        position_rad=target_rad,
-                        speed=speed_scaled,
-                        accel=0,
-                    )
-                    utils.current_gripper_angle_rad = target_rad
-        except Exception as e:
-            print(f"[Jog] WARNING: Gripper jog update failed: {e}")
 
         # Periodic status log (every ~0.5 s)
         now = time.monotonic()
@@ -1308,6 +1626,7 @@ def _jog_controller_thread():
     utils.trajectory_state["is_jogging"] = False
     if utils.trajectory_state.get("jog_thread") is threading.current_thread():
         utils.trajectory_state["jog_thread"] = None
+    _update_jog_ik_status("stopped", "jog controller thread stopped")
 
 
 def handle_jog_start():
@@ -1318,9 +1637,12 @@ def handle_jog_start():
 
     print("[Jog] Starting jog mode...")
     utils.trajectory_state["is_jogging"] = True
+    utils.trajectory_state["weld_active"] = False
+    utils.trajectory_state["current_weld_type"] = None
     utils.trajectory_state["last_jog_command_time"] = time.monotonic()
     utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
     utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    _update_jog_ik_status("starting", "jog start requested")
 
     jog_thread = threading.Thread(target=_jog_controller_thread, daemon=True)
     utils.trajectory_state["jog_thread"] = jog_thread
@@ -1330,19 +1652,12 @@ def handle_jog_start():
 def handle_jog_stop():
     """Stops the real-time jogging mode."""
     print("[Jog] Stopping jog mode...")
-    utils.trajectory_state["is_jogging"] = False # Signal the thread to exit
-    utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    _force_stop_jog_controller()
+    utils.trajectory_state["weld_active"] = False
+    utils.trajectory_state["current_weld_type"] = None
 
-    # Give the jog thread a moment to stop
-    thread = utils.trajectory_state.get("jog_thread")
-    if thread and thread.is_alive():
-        thread.join(timeout=0.5)
-    utils.trajectory_state["jog_thread"] = None
-
-    # Hard stop the servos as a final safety measure
-    current_angles = servo_driver.get_current_arm_state_rad(verbose=False)
-    if current_angles:
-        servo_driver.set_servo_positions(current_angles, 0, 100)
+    _brake_to_current_position("jog stop")
+    _close_jog_diag_log()
     
     print("[Jog] Jog mode stopped.")
 
@@ -1373,6 +1688,8 @@ def handle_set_jog_deadman(enabled: bool):
     if not enabled:
         utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
         utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+        _force_stop_jog_controller(join_timeout_s=0.15)
+        _brake_to_current_position("deadman released")
     if utils.trajectory_state.get("jog_debug", False):
         print(f"[Jog] Deadman set to {enabled}")
 
@@ -1380,6 +1697,10 @@ def handle_set_jog_deadman(enabled: bool):
 def handle_set_jog_debug(enabled: bool):
     """Enables/disables verbose jog logging."""
     utils.trajectory_state["jog_debug"] = bool(enabled)
+    if enabled:
+        _ensure_jog_diag_log()
+    else:
+        _close_jog_diag_log()
     print(f"[Jog] Debug logging set to {enabled}")
 
 
