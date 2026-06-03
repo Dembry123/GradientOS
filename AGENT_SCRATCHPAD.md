@@ -5014,3 +5014,25 @@ Use this file as persistent, repo-local execution memory.
 - Do not assume a fork exists until `gh auth status` succeeds and `gh repo view dylanembry/GradientOS` or the authenticated account's fork URL resolves.
 - Before staging for a remote WIP commit, review untracked `.claude/settings.local.json` and `logs/*.pid`; these are preserved locally but may be private/runtime-only.
 - Preferred remote layout after auth: `upstream` = `terrorproforma/GradientOS`, `origin` = personal fork, then push the chosen branch to `origin`.
+
+### 2026-06-02 21:20 CDT - Fork migration completed
+
+#### Trigger / Context
+
+- User resumed the fork task after GitHub device auth was approved.
+
+#### Useful Mental Model
+
+- GitHub CLI authenticated as `Dembry123`.
+- Personal fork now exists at `https://github.com/Dembry123/GradientOS`.
+- Remote layout is now:
+  - `origin` = `https://github.com/Dembry123/GradientOS.git`
+  - `upstream` = `https://github.com/terrorproforma/GradientOS.git`
+- Local preservation commit is `828d702a chore: preserve local GradientOS changes`.
+- Branch `fix/program-tree-modal-dismissable` was pushed to `origin` and tracks `origin/fix/program-tree-modal-dismissable`.
+
+#### Guardrails For Next Session
+
+- Push personal/local work to `origin`; use `upstream` only to fetch or compare against the OSS repository.
+- Do not stage `.claude/settings.local.json` or `logs/*.pid`; `.gitignore` now excludes them.
+- The safety snapshot from the blocked attempt remains available at `/Users/dylanembry/Projects/GradientOS-local-snapshots/20260602-181212`.
