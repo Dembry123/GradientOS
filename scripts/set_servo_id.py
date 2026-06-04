@@ -1,11 +1,12 @@
 """Rename a single Feetech servo's hardware ID.
 
-Writes a new ID to register 0x05 (EEPROM). The new ID persists across power cycles.
+Writes a new ID to the Feetech ID EEPROM register. The new ID persists across
+power cycles.
 
-SAFETY: This tool refuses to run if (a) more than one device responds at the
-source ID, or (b) any device already responds at the target ID. To rename a
-factory-fresh servo (ID 1), physically disconnect all other ID-1 servos from
-the daisy chain before running.
+SAFETY: This protocol cannot prove how many physical servos share the same
+source ID. To rename a factory-fresh servo (ID 1), physically disconnect all
+other ID-1 servos from the daisy chain before running. This tool verifies that
+the source ID responds stably and the target ID is not already occupied.
 
 Usage:
     python scripts/set_servo_id.py --from 1 --to 31
@@ -17,43 +18,17 @@ import time
 
 import serial
 
-HEADER = 0xFF
-INSTR_PING = 0x01
-INSTR_WRITE = 0x03
-REG_ID = 0x05
-REG_WRITE_LOCK = 0x37
+from gradient_os.arm_controller.backends.feetech import config, protocol
 
 VALID_TARGETS = {10, 20, 21, 30, 31, 40, 50, 60, 100}
 OP_GAP_S = 0.01
 EEPROM_COMMIT_S = 0.15
 
 
-def _checksum(packet_after_headers: bytes) -> int:
-    return (~sum(packet_after_headers)) & 0xFF
-
-
-def ping(ser: serial.Serial, sid: int) -> bool:
-    pkt = bytearray([HEADER, HEADER, sid, 2, INSTR_PING])
-    pkt.append(_checksum(pkt[2:5]))
-    ser.reset_input_buffer()
-    ser.write(pkt)
-    resp = ser.read(6)
-    return (
-        len(resp) == 6
-        and resp[0] == HEADER
-        and resp[1] == HEADER
-        and resp[2] == sid
-    )
-
-
-def write_register(ser: serial.Serial, sid: int, addr: int, value: int) -> None:
-    """Single-byte register write. No response is awaited beyond input drain."""
-    pkt = bytearray([HEADER, HEADER, sid, 4, INSTR_WRITE, addr, value])
-    pkt.append(_checksum(pkt[2:7]))
-    ser.reset_input_buffer()
-    ser.write(pkt)
-    ser.read(6)  # status packet (or whatever the bus echoes); discard
+def write_register(ser: serial.Serial, sid: int, addr: int, value: int) -> bool:
+    ok = protocol.write_register_byte(ser, sid, addr, value)
     time.sleep(OP_GAP_S)
+    return ok
 
 
 def main() -> int:
@@ -89,54 +64,58 @@ def main() -> int:
     print(f"Renaming servo {args.src} -> {args.dst} on {args.port}\n")
 
     print(f"  [check] does ID {args.src} respond?", end=" ", flush=True)
-    if not ping(ser, args.src):
+    if not protocol.ping(ser, args.src):
         print("NO")
         print(f"FAIL: no device at ID {args.src}. Nothing to rename.", file=sys.stderr)
         return 1
     print("yes")
 
     print(f"  [check] is target ID {args.dst} already taken?", end=" ", flush=True)
-    if ping(ser, args.dst):
+    if protocol.ping(ser, args.dst):
         print("YES")
         print(f"FAIL: ID {args.dst} already in use. Refusing to write to avoid a collision.",
               file=sys.stderr)
         return 1
     print("no")
 
-    print(f"  [check] confirm exactly one device at ID {args.src} (re-ping x5)...", end=" ", flush=True)
-    hits = sum(1 for _ in range(5) if ping(ser, args.src))
+    print(f"  [check] confirm stable communication with ID {args.src} (re-ping x5)...", end=" ", flush=True)
+    hits = sum(1 for _ in range(5) if protocol.ping(ser, args.src))
     print(f"{hits}/5 responses")
     if hits < 5:
-        print("WARN: not all probes succeeded. This may indicate a collision (multiple "
-              "servos at the source ID) or a flaky cable. Proceeding anyway is risky — "
+        print("WARN: not all probes succeeded. This may indicate an ID collision, "
+              "bus echo/noise, or a flaky cable. Proceeding anyway is risky; "
               "physically disconnect all but one ID-1 servo and rerun.", file=sys.stderr)
         return 1
 
     print(f"\n  [write] unlock EEPROM on ID {args.src}")
-    write_register(ser, args.src, REG_WRITE_LOCK, 0)
+    if not write_register(ser, args.src, config.SERVO_ADDR_WRITE_LOCK, 0):
+        print("FAIL", file=sys.stderr)
+        return 1
 
-    print(f"  [write] register 0x05 on ID {args.src} <- {args.dst}")
-    write_register(ser, args.src, REG_ID, args.dst)
+    print(f"  [write] register 0x{config.SERVO_ADDR_ID:02X} on ID {args.src} <- {args.dst}")
+    if not write_register(ser, args.src, config.SERVO_ADDR_ID, args.dst):
+        print("FAIL", file=sys.stderr)
+        return 1
     time.sleep(EEPROM_COMMIT_S)  # let EEPROM commit
 
     print(f"  [verify] ping new ID {args.dst}...", end=" ", flush=True)
-    new_ok = ping(ser, args.dst)
+    new_ok = protocol.ping(ser, args.dst)
     print("ok" if new_ok else "FAIL")
 
     print(f"  [verify] confirm old ID {args.src} is gone...", end=" ", flush=True)
-    old_gone = not ping(ser, args.src)
+    old_gone = not protocol.ping(ser, args.src)
     print("ok" if old_gone else "STILL RESPONDS")
 
     if new_ok:
         print(f"  [write] relock EEPROM on ID {args.dst}")
-        write_register(ser, args.dst, REG_WRITE_LOCK, 1)
+        relock_write_ok = write_register(ser, args.dst, config.SERVO_ADDR_WRITE_LOCK, 1)
         print(f"  [verify] ping relocked ID {args.dst}...", end=" ", flush=True)
-        relock_ok = ping(ser, args.dst)
+        relock_ok = relock_write_ok and protocol.ping(ser, args.dst)
         print("ok" if relock_ok else "FAIL")
         new_ok = new_ok and relock_ok
-    elif ping(ser, args.src):
+    elif protocol.ping(ser, args.src):
         print(f"  [write] relock EEPROM on original ID {args.src}")
-        write_register(ser, args.src, REG_WRITE_LOCK, 1)
+        write_register(ser, args.src, config.SERVO_ADDR_WRITE_LOCK, 1)
 
     ser.close()
 

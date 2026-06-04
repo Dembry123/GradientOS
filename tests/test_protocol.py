@@ -6,6 +6,7 @@ from gradient_os.arm_controller import servo_protocol
 from gradient_os.arm_controller import utils
 from gradient_os.arm_controller.backends.feetech import config as feetech_config
 from gradient_os.arm_controller.backends.feetech import protocol as feetech_protocol
+from scripts import torque as torque_script
 
 
 class FakeSerial:
@@ -27,6 +28,11 @@ class FakeSerial:
 
 def _status_packet(servo_id: int, status: int, data: bytes) -> bytes:
     body = bytes([servo_id, len(data) + 2, status]) + data
+    return b"\xff\xff" + body + bytes([feetech_protocol.calculate_checksum(body)])
+
+
+def _instruction_packet(servo_id: int, instruction: int, params: bytes = b"") -> bytes:
+    body = bytes([servo_id, len(params) + 2, instruction]) + params
     return b"\xff\xff" + body + bytes([feetech_protocol.calculate_checksum(body)])
 
 class TestServoProtocol(unittest.TestCase):
@@ -138,6 +144,78 @@ class TestServoProtocol(unittest.TestCase):
         parsed = feetech_config.parse_telemetry_block2(data)
 
         self.assertEqual(parsed["status_names"], ["Overload"])
+
+    def test_feetech_read_word_skips_echo_and_validates_status(self) -> None:
+        command = _instruction_packet(
+            20,
+            feetech_config.SERVO_INSTRUCTION_READ,
+            bytes([feetech_config.SERVO_ADDR_PRESENT_POSITION, 2]),
+        )
+        response = command + _status_packet(20, 0, bytes([0x5C, 0x06]))
+
+        value = feetech_protocol.read_register_word(FakeSerial(response), 20, feetech_config.SERVO_ADDR_PRESENT_POSITION)
+
+        self.assertEqual(value, 1628)
+
+    def test_feetech_read_word_rejects_bad_checksum(self) -> None:
+        command = _instruction_packet(
+            20,
+            feetech_config.SERVO_INSTRUCTION_READ,
+            bytes([feetech_config.SERVO_ADDR_PRESENT_POSITION, 2]),
+        )
+        status = bytearray(_status_packet(20, 0, bytes([0x5C, 0x06])))
+        status[-1] ^= 0xFF
+
+        value = feetech_protocol.read_register_word(FakeSerial(command + bytes(status)), 20, feetech_config.SERVO_ADDR_PRESENT_POSITION)
+
+        self.assertIsNone(value)
+
+    def test_feetech_write_byte_requires_success_status(self) -> None:
+        ok = feetech_protocol.write_register_byte(
+            FakeSerial(_status_packet(20, 0, b"")),
+            20,
+            feetech_config.SERVO_ADDR_TORQUE_SWITCH,
+            1,
+        )
+
+        self.assertTrue(ok)
+
+    def test_feetech_write_byte_rejects_error_status(self) -> None:
+        ok = feetech_protocol.write_register_byte(
+            FakeSerial(_status_packet(20, 0x20, b"")),
+            20,
+            feetech_config.SERVO_ADDR_TORQUE_SWITCH,
+            1,
+        )
+
+        self.assertFalse(ok)
+
+    def test_torque_hold_refuses_to_write_after_invalid_position_read(self) -> None:
+        class FakeProtocol:
+            calls: list[str] = []
+
+            @staticmethod
+            def read_register_word(*args, **kwargs):
+                FakeProtocol.calls.append("read")
+                return None
+
+            @staticmethod
+            def write_register_word(*args, **kwargs):
+                FakeProtocol.calls.append("write_word")
+                return True
+
+            @staticmethod
+            def write_register_byte(*args, **kwargs):
+                FakeProtocol.calls.append("write_byte")
+                return True
+
+        original_protocol = torque_script.protocol
+        torque_script.protocol = FakeProtocol
+        try:
+            self.assertFalse(torque_script.engage_torque_hold(object(), 20))
+            self.assertEqual(FakeProtocol.calls, ["read"])
+        finally:
+            torque_script.protocol = original_protocol
 
 
 if __name__ == '__main__':

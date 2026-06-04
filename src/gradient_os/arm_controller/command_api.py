@@ -1553,6 +1553,21 @@ def _jog_controller_thread():
                         time.sleep(sleep_time)
                     continue
 
+                if (
+                    not utils.trajectory_state.get("is_jogging", False)
+                    or not utils.trajectory_state.get("jog_deadman", False)
+                ):
+                    _update_jog_ik_status(
+                        "command_cancelled",
+                        "jog stopped before servo command",
+                        command_age_s=time_since_last_cmd,
+                    )
+                    loop_duration = time.monotonic() - loop_start_time
+                    sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    continue
+
                 servo_driver.set_servo_positions(q_clamped, 800, 0)
                 actual_angles = None
                 diag_count = int(utils.trajectory_state.get("jog_diag_sample_count", 0)) + 1
@@ -1688,7 +1703,6 @@ def handle_set_jog_deadman(enabled: bool):
     if not enabled:
         utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
         utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
-        _force_stop_jog_controller(join_timeout_s=0.15)
         _brake_to_current_position("deadman released")
     if utils.trajectory_state.get("jog_debug", False):
         print(f"[Jog] Deadman set to {enabled}")

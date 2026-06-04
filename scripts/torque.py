@@ -20,91 +20,41 @@ import time
 
 import serial
 
+from gradient_os.arm_controller.backends.feetech import config, protocol
+
 EXPECTED = [10, 20, 21, 30, 31, 40, 50, 60, 100]
-HEADER = 0xFF
-INSTR_WRITE = 0x03
-INSTR_READ = 0x02
-REG_TARGET_POSITION = 0x2A
-REG_TORQUE_SWITCH = 0x28
-REG_CURRENT_POSITION = 0x38
-
-
-def _checksum(buf: bytes) -> int:
-    return (~sum(buf)) & 0xFF
 
 
 _OP_GAP_S = 0.003  # let the half-duplex bus settle between consecutive transactions
 
 
-def read_word(ser: serial.Serial, sid: int, addr: int, retries: int = 5) -> int | None:
-    """Half-duplex-safe register read.
-
-    The CH340 adapter echoes our 8-byte TX onto the same RX line that the servo
-    then replies on. So the byte stream is up to 16 bytes per request:
-    [echo(8)] then [response(8)]. We read up to 24 bytes and scan for the
-    response packet, distinguishing it from the echo by inspecting offset +4
-    (which is INSTR_READ in an echo, error-flag in a response).
-    """
-    pkt = bytearray([HEADER, HEADER, sid, 4, INSTR_READ, addr, 2])
-    pkt.append(_checksum(pkt[2:7]))
-    for _ in range(retries):
-        ser.reset_input_buffer()
-        ser.write(pkt)
-        # Wait long enough for echo + servo response delay (~500us default) +
-        # response transmission. 5ms is generous at 1Mbps.
-        time.sleep(0.005)
-        resp = ser.read(24)
-        time.sleep(_OP_GAP_S)
-        # Scan the buffer for a valid response packet from this servo.
-        for i in range(len(resp) - 7):
-            if resp[i] != HEADER or resp[i + 1] != HEADER or resp[i + 2] != sid:
-                continue
-            if resp[i + 4] == INSTR_READ:
-                # Echo of our own request — skip past it.
-                continue
-            return resp[i + 5] | (resp[i + 6] << 8)
-    return None
-
-
-def write_byte(ser: serial.Serial, sid: int, addr: int, value: int) -> None:
-    pkt = bytearray([HEADER, HEADER, sid, 4, INSTR_WRITE, addr, value & 0xFF])
-    pkt.append(_checksum(pkt[2:7]))
-    ser.reset_input_buffer()
-    ser.write(pkt)
-    ser.read(6)
-    time.sleep(_OP_GAP_S)
-
-
-def write_word(ser: serial.Serial, sid: int, addr: int, value: int) -> None:
-    lo = value & 0xFF
-    hi = (value >> 8) & 0xFF
-    pkt = bytearray([HEADER, HEADER, sid, 5, INSTR_WRITE, addr, lo, hi])
-    pkt.append(_checksum(pkt[2:8]))
-    ser.reset_input_buffer()
-    ser.write(pkt)
-    ser.read(6)
+def _op_gap() -> None:
     time.sleep(_OP_GAP_S)
 
 
 def engage_torque_hold(ser: serial.Serial, sid: int) -> bool:
     """Read current position, set it as target, then enable torque. Returns True on success."""
-    pos = read_word(ser, sid, REG_CURRENT_POSITION)
+    pos = protocol.read_register_word(ser, sid, config.SERVO_ADDR_PRESENT_POSITION)
     if pos is None:
         return False
-    write_word(ser, sid, REG_TARGET_POSITION, pos)
-    write_byte(ser, sid, REG_TORQUE_SWITCH, 1)
-    return True
+    _op_gap()
+    if not protocol.write_register_word(ser, sid, config.SERVO_ADDR_TARGET_POSITION, pos):
+        return False
+    _op_gap()
+    return protocol.write_register_byte(ser, sid, config.SERVO_ADDR_TORQUE_SWITCH, 1)
 
 
-def disable_torque(ser: serial.Serial, sid: int) -> None:
-    write_byte(ser, sid, REG_TORQUE_SWITCH, 0)
+def disable_torque(ser: serial.Serial, sid: int) -> bool:
+    ok = protocol.write_register_byte(ser, sid, config.SERVO_ADDR_TORQUE_SWITCH, 0)
+    _op_gap()
+    return ok
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("mode", choices=["on", "off"])
     p.add_argument("--port", default="/dev/tty.usbserial-110")
-    p.add_argument("--baud", type=int, default=1_000_000)
+    p.add_argument("--baud", type=int, default=config.DEFAULT_BAUD_RATE)
     p.add_argument(
         "--ids",
         default=",".join(str(sid) for sid in EXPECTED),
@@ -160,8 +110,11 @@ def main() -> int:
                 print(f"  servo {sid}: FAILED to read position; torque not engaged")
                 failures.append(sid)
         else:
-            disable_torque(ser, sid)
-            print(f"  servo {sid}: torque OFF")
+            if disable_torque(ser, sid):
+                print(f"  servo {sid}: torque OFF")
+            else:
+                print(f"  servo {sid}: FAILED to disable torque")
+                failures.append(sid)
         time.sleep(0.01)
 
     ser.close()

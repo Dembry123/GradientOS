@@ -8,9 +8,10 @@ Usage: python scripts/scan_servo_bus.py [--port /dev/tty.usbserial-110] [--baud 
 import argparse
 import sys
 import time
-from typing import Optional
 
 import serial
+
+from gradient_os.arm_controller.backends.feetech import config, protocol
 
 EXPECTED = [10, 20, 21, 30, 31, 40, 50, 60, 100]
 FACTORY_DEFAULTS = [1, 2, 3]
@@ -26,39 +27,11 @@ JOINT_LABEL = {
     100: "gripper",
 }
 
-HEADER = 0xFF
-INSTR_PING = 0x01
-
-
-def ping(ser: serial.Serial, servo_id: int) -> Optional[bytes]:
-    pkt = bytearray([HEADER, HEADER, servo_id, 2, INSTR_PING])
-    checksum = (~sum(pkt[2:5])) & 0xFF
-    pkt.append(checksum)
-    ser.reset_input_buffer()
-    ser.write(pkt)
-    # CH340-style half-duplex adapters can echo our TX bytes before the servo
-    # status packet. Read a wider window and ignore the exact echoed command.
-    time.sleep(0.005)
-    resp = ser.read(24)
-    for idx in range(max(0, len(resp) - 5)):
-        frame = bytes(resp[idx : idx + 6])
-        if (
-            len(frame) == 6
-            and frame[0] == HEADER
-            and frame[1] == HEADER
-            and frame[2] == servo_id
-            and ((~sum(frame[2:5])) & 0xFF) == frame[5]
-        ):
-            if frame == bytes(pkt):
-                continue
-            return frame
-    return None
-
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--port", default="/dev/tty.usbserial-110")
-    p.add_argument("--baud", type=int, default=1_000_000)
+    p.add_argument("--baud", type=int, default=config.DEFAULT_BAUD_RATE)
     p.add_argument("--full-sweep", action="store_true",
                    help="Also sweep IDs 1..253 (slow, ~25s).")
     args = p.parse_args()
@@ -76,7 +49,7 @@ def main() -> int:
     print("Expected Gradient0 servos:")
     present_expected: list[int] = []
     for sid in EXPECTED:
-        ok = ping(ser, sid) is not None
+        ok = protocol.ping(ser, sid)
         tag = "PRESENT" if ok else "ABSENT "
         print(f"  [{tag}] ID {sid:>3}  ({JOINT_LABEL[sid]})")
         if ok:
@@ -86,7 +59,7 @@ def main() -> int:
     print("\nFactory-default IDs (any response here = unconfigured servo on bus):")
     factory_hits: list[int] = []
     for sid in FACTORY_DEFAULTS:
-        ok = ping(ser, sid) is not None
+        ok = protocol.ping(ser, sid)
         tag = "RESPONDED" if ok else "silent   "
         print(f"  [{tag}] ID {sid}")
         if ok:
@@ -100,7 +73,7 @@ def main() -> int:
         for sid in range(4, 254):
             if sid in already:
                 continue
-            if ping(ser, sid) is not None:
+            if protocol.ping(ser, sid):
                 print(f"  [HIT] ID {sid}")
                 extra_hits.append(sid)
             time.sleep(0.003)

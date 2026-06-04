@@ -6,6 +6,15 @@ This file was previously `QUICK_START.md` and is now the primary startup + execu
 ### Agent workflow pointers
 
 - `web-ui/design.md` - living UI consistency spec (typography hierarchy, panel rules, spacing, review checklist). Update when UI conventions change.
+- `docs/agent-review-discipline.md` - cross-agent code review discipline. Use this before returning branch-review findings or approving broad implementation branches.
+
+Do not create or maintain agent logging files such as `DEVLOG.md` or `AGENT_SCRATCHPAD.md` unless the user explicitly asks for them. Persistent agent guidance belongs in this file, `docs/agent-review-discipline.md`, or tool-specific shims that point back to those canonical files.
+
+### Cross-agent instruction surfaces
+
+- `AGENTS.md` is the canonical repo instruction file.
+- `CLAUDE.md` exists only as a Claude Code compatibility shim and should import this file.
+- `.cursor/rules/*` files are Cursor-specific shims or Cursor workflow rules. Do not treat them as universal guidance.
 
 ### Skills catalog (all installed) and when to use each
 

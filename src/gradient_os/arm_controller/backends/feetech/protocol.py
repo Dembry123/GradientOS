@@ -84,6 +84,61 @@ def calculate_checksum(packet_data: bytearray) -> int:
     return (~current_sum) & 0xFF
 
 
+def _build_instruction_packet(servo_id: int, instruction: int, params: bytes = b"") -> bytearray:
+    packet = bytearray([config.SERVO_HEADER, config.SERVO_HEADER, servo_id, len(params) + 2, instruction])
+    packet.extend(params)
+    packet.append(calculate_checksum(packet[2:]))
+    return packet
+
+
+def _find_status_packet(
+    response: bytes,
+    servo_id: int,
+    expected_data_len: int,
+    command: bytes | None = None,
+) -> Optional[bytes]:
+    expected_length = expected_data_len + 2
+    frame_len = expected_length + 4
+    if len(response) < frame_len:
+        return None
+
+    for idx in range(len(response) - frame_len + 1):
+        frame = bytes(response[idx : idx + frame_len])
+        if command is not None and frame == command:
+            continue
+        if frame[0] != config.SERVO_HEADER or frame[1] != config.SERVO_HEADER:
+            continue
+        if frame[2] != servo_id or frame[3] != expected_length:
+            continue
+        if calculate_checksum(bytearray(frame[2:-1])) != frame[-1]:
+            continue
+        return frame
+    return None
+
+
+def _send_instruction_and_read_status(
+    ser: serial.Serial,
+    packet: bytes,
+    servo_id: int,
+    expected_data_len: int,
+    read_size: int = 24,
+) -> Optional[bytes]:
+    expected_frame_len = expected_data_len + 6
+    try:
+        with _SERIAL_LOCK:
+            ser.reset_input_buffer()
+            ser.write(packet)
+            # CH340-style half-duplex adapters can echo transmitted bytes before
+            # the servo status packet. Read a wider window and scan for a valid
+            # status frame instead of trusting the first header-looking bytes.
+            time.sleep(0.005)
+            response = ser.read(max(read_size, len(packet) + expected_frame_len))
+        return _find_status_packet(response, servo_id, expected_data_len, command=bytes(packet))
+    except Exception as e:
+        print(f"[Feetech] Serial transaction failed for servo {servo_id}: {e}")
+        return None
+
+
 # =============================================================================
 # Basic Communication Functions
 # =============================================================================
@@ -102,38 +157,13 @@ def ping(ser: serial.Serial, servo_id: int) -> bool:
     if ser is None or not ser.is_open:
         return False
 
-    # PING Packet: [0xFF, 0xFF, ID, Length=2, Instr=0x01, Checksum]
-    ping_command = bytearray(6)
-    ping_command[0] = config.SERVO_HEADER
-    ping_command[1] = config.SERVO_HEADER
-    ping_command[2] = servo_id
-    ping_command[3] = 2  # Length = NumParams(0) + 2
-    ping_command[4] = config.SERVO_INSTRUCTION_PING
-    ping_command[5] = calculate_checksum(ping_command[2:5])
+    ping_command = _build_instruction_packet(servo_id, config.SERVO_INSTRUCTION_PING)
 
     try:
-        with _SERIAL_LOCK:
-            ser.reset_input_buffer()
-            ser.write(ping_command)
-            # CH340-style half-duplex adapters can echo the transmitted PING
-            # before the servo status packet. Read a wider window and skip the
-            # exact echoed command.
-            time.sleep(0.005)
-            response = ser.read(24)
-
-        for idx in range(max(0, len(response) - 5)):
-            frame = bytes(response[idx : idx + 6])
-            if (
-                len(frame) == 6
-                and frame[0] == config.SERVO_HEADER
-                and frame[1] == config.SERVO_HEADER
-                and frame[2] == servo_id
-                and calculate_checksum(bytearray(frame[2:5])) == frame[5]
-            ):
-                if frame == bytes(ping_command):
-                    continue
-                _present_servo_ids.add(servo_id)
-                return True
+        status = _send_instruction_and_read_status(ser, ping_command, servo_id, expected_data_len=0)
+        if status is not None and status[4] == 0:
+            _present_servo_ids.add(servo_id)
+            return True
         return False
 
     except Exception as e:
@@ -156,31 +186,15 @@ def read_register_byte(ser: serial.Serial, servo_id: int, register_address: int)
     if ser is None or not ser.is_open:
         return None
 
-    # Command: [0xFF, 0xFF, ID, Length=4, Instr=0x02, Addr, BytesToRead=1, Checksum]
-    read_command = bytearray(8)
-    read_command[0] = config.SERVO_HEADER
-    read_command[1] = config.SERVO_HEADER
-    read_command[2] = servo_id
-    read_command[3] = 4  # Length
-    read_command[4] = config.SERVO_INSTRUCTION_READ
-    read_command[5] = register_address
-    read_command[6] = 1  # Number of bytes to read
-    read_command[7] = calculate_checksum(read_command[2:7])
+    read_command = _build_instruction_packet(
+        servo_id,
+        config.SERVO_INSTRUCTION_READ,
+        bytes([register_address, 1]),
+    )
 
     try:
-        with _SERIAL_LOCK:
-            ser.reset_input_buffer()
-            ser.write(read_command)
-            # Expected response: [0xFF, 0xFF, ID, Length=3, Error, Value, Checksum]
-            response = ser.read(7)
-
-        if len(response) < 7:
-            return None
-        if not (response[0] == 0xFF and response[1] == 0xFF and response[2] == servo_id):
-            return None
-        if response[6] != calculate_checksum(response[2:6]):
-            return None
-        if response[4] != 0:  # Error byte
+        response = _send_instruction_and_read_status(ser, read_command, servo_id, expected_data_len=1)
+        if response is None or response[4] != 0:
             return None
         return response[5]
 
@@ -203,36 +217,18 @@ def read_register_word(ser: serial.Serial, servo_id: int, register_address: int)
     if ser is None or not ser.is_open:
         return None
 
-    # Command: [0xFF, 0xFF, ID, Length=4, Instr=0x02, Addr, BytesToRead=2, Checksum]
-    read_command = bytearray(8)
-    read_command[0] = config.SERVO_HEADER
-    read_command[1] = config.SERVO_HEADER
-    read_command[2] = servo_id
-    read_command[3] = 4  # Length
-    read_command[4] = config.SERVO_INSTRUCTION_READ
-    read_command[5] = register_address
-    read_command[6] = 2  # Number of bytes to read
-    read_command[7] = calculate_checksum(read_command[2:7])
+    read_command = _build_instruction_packet(
+        servo_id,
+        config.SERVO_INSTRUCTION_READ,
+        bytes([register_address, 2]),
+    )
 
     try:
-        with _SERIAL_LOCK:
-            ser.reset_input_buffer()
-            ser.write(read_command)
-            # Expected response: [0xFF, 0xFF, ID, Length=4, Error, Val_L, Val_H, Checksum]
-            response = ser.read(8)
+        response = _send_instruction_and_read_status(ser, read_command, servo_id, expected_data_len=2)
+        if response is None or response[4] != 0:
+            return None
 
-        if len(response) < 8:
-            return None
-        if not (response[0] == 0xFF and response[1] == 0xFF and response[2] == servo_id):
-            return None
-        if response[7] != calculate_checksum(response[2:7]):
-            return None
-        if response[4] != 0:  # Error byte
-            return None
-        
-        # Little-endian 16-bit value
-        value = response[5] | (response[6] << 8)
-        return value
+        return response[5] | (response[6] << 8)
 
     except Exception:
         return None
@@ -256,21 +252,15 @@ def write_register_byte(ser: serial.Serial, servo_id: int, register_address: int
 
     val_clamped = int(max(0, min(255, value)))
 
-    # Packet: [0xFF, 0xFF, ID, Length=4, Instr=0x03, Addr, Value, Checksum]
-    packet = bytearray(8)
-    packet[0] = config.SERVO_HEADER
-    packet[1] = config.SERVO_HEADER
-    packet[2] = servo_id
-    packet[3] = 4  # Length = Instr(1) + Addr(1) + Value(1) + 1
-    packet[4] = config.SERVO_INSTRUCTION_WRITE
-    packet[5] = register_address
-    packet[6] = val_clamped
-    packet[7] = calculate_checksum(packet[2:7])
+    packet = _build_instruction_packet(
+        servo_id,
+        config.SERVO_INSTRUCTION_WRITE,
+        bytes([register_address, val_clamped]),
+    )
 
     try:
-        with _SERIAL_LOCK:
-            ser.write(packet)
-        return True
+        response = _send_instruction_and_read_status(ser, packet, servo_id, expected_data_len=0)
+        return response is not None and response[4] == 0
     except Exception as e:
         print(f"[Feetech] Error writing byte to servo {servo_id} register {hex(register_address)}: {e}")
         return False
@@ -294,22 +284,15 @@ def write_register_word(ser: serial.Serial, servo_id: int, register_address: int
 
     val_clamped = int(value)
 
-    # Packet: [0xFF, 0xFF, ID, Length=5, Instr=0x03, Addr, Val_L, Val_H, Checksum]
-    packet = bytearray(9)
-    packet[0] = config.SERVO_HEADER
-    packet[1] = config.SERVO_HEADER
-    packet[2] = servo_id
-    packet[3] = 5  # Length
-    packet[4] = config.SERVO_INSTRUCTION_WRITE
-    packet[5] = register_address
-    packet[6] = val_clamped & 0xFF         # Low byte
-    packet[7] = (val_clamped >> 8) & 0xFF  # High byte
-    packet[8] = calculate_checksum(packet[2:8])
+    packet = _build_instruction_packet(
+        servo_id,
+        config.SERVO_INSTRUCTION_WRITE,
+        bytes([register_address, val_clamped & 0xFF, (val_clamped >> 8) & 0xFF]),
+    )
 
     try:
-        with _SERIAL_LOCK:
-            ser.write(packet)
-        return True
+        response = _send_instruction_and_read_status(ser, packet, servo_id, expected_data_len=0)
+        return response is not None and response[4] == 0
     except Exception as e:
         print(f"[Feetech] Error writing word to servo {servo_id} register {hex(register_address)}: {e}")
         return False

@@ -50,6 +50,7 @@ SERVO_INSTRUCTION_SYNC_WRITE = 0x83     # Write multiple servos at once
 # Register Addresses - EEPROM Area (values persist after power cycle)
 # -----------------------------------------------------------------------------
 
+SERVO_ADDR_ID = 0x05                    # Hardware ID (1 byte)
 SERVO_ADDR_MIN_ANGLE_LIMIT = 0x09       # Minimum angle limit (2 bytes)
 SERVO_ADDR_MAX_ANGLE_LIMIT = 0x0B       # Maximum angle limit (2 bytes)
 SERVO_ADDR_POS_KP = 0x15                # Position PID - Proportional gain
@@ -62,6 +63,7 @@ SERVO_ADDR_WRITE_LOCK = 0x37            # EEPROM write lock (0=unlocked, 1=locke
 # Register Addresses - RAM Area (values reset on power cycle)
 # -----------------------------------------------------------------------------
 
+SERVO_ADDR_TORQUE_SWITCH = 0x28         # Torque enable/disable (1 byte)
 SERVO_ADDR_TARGET_ACCELERATION = 0x29   # Target acceleration (1 byte)
 SERVO_ADDR_TARGET_POSITION = 0x2A       # Target position (2 bytes)
 # Note: 0x2C-0x2D is "Goal Time", 0x2E-0x2F is "Goal Speed"
