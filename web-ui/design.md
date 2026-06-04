@@ -97,5 +97,4 @@ Use these tokens before introducing new text-size classes.
 When adjusting design rules:
 
 1. Update this file.
-2. Reference the change in `AGENTS.md`.
-3. Log implementation/validation in `DEVLOG.md`.
+2. Reference the change in `AGENTS.md` when conventions affect agent guidance.
