@@ -26,6 +26,7 @@ from typing import Iterable, Optional, TYPE_CHECKING
 from . import utils
 from . import servo_protocol
 from . import robot_config
+from .serial_ports import is_macos, serial_candidate_patterns
 
 if TYPE_CHECKING:
     from .actuator_interface import ActuatorBackend
@@ -72,35 +73,13 @@ def _env_truthy(var_name: str, default: bool = False) -> bool:
         return default
     return val.strip().lower() in {"1", "true", "yes", "on"}
 
-_ALL_CANDIDATE_PATTERNS: tuple[str, ...] = (
-    "/dev/serial/by-id/*",
-    "/dev/serial/by-path/*",
-    "/dev/ttyUSB*",
-    "/dev/ttyACM*",
-    "/dev/ttyAMA*",   # Raspberry Pi PL011 / mini-UART (legacy)
-    "/dev/ttyTHS*",   # NVIDIA Jetson hardware UART
-    "/dev/ttyS*",     # Generic on-board UARTs (includes ttyS0 on many SBCs)
-)
-
-_USB_ONLY_PATTERNS: tuple[str, ...] = (
-    # Prefer stable, USB-backed symlinks
-    "/dev/serial/by-id/usb-*",
-    # Only entries behind a USB hop on the host bus
-    "/dev/serial/by-path/*-usb-*/**",
-    # Classic USB serial drivers
-    "/dev/ttyACM*",
-    "/dev/ttyUSB*",
-)
-
 def _get_candidate_patterns() -> tuple[str, ...]:
     """
     Default to scanning only USB serial devices. To also scan on-board UARTs,
     set the environment variable SERIAL_SCAN_INCLUDE_UART to a truthy value.
     """
     include_uart = _env_truthy("SERIAL_SCAN_INCLUDE_UART", default=False)
-    if include_uart:
-        return _ALL_CANDIDATE_PATTERNS
-    return _USB_ONLY_PATTERNS
+    return serial_candidate_patterns(include_uart=include_uart)
 
 
 def _is_serial_response_valid(response: object, servo_id: int) -> bool:
@@ -295,7 +274,7 @@ def _resolve_serial_port() -> Optional[str]:
 
     candidates = _candidate_serial_devices()
     if not candidates:
-        print("[Pi] Serial auto-detect found no candidate devices. Falling back to configured path.")
+        print("[Pi] Serial auto-detect found no candidate devices.")
         return utils.SERIAL_PORT
 
     responsive = [path for path in candidates if _probe_serial_device(path, utils.SERVO_IDS)]
@@ -309,10 +288,16 @@ def _resolve_serial_port() -> Optional[str]:
         print("[Pi] Warning: Multiple serial devices responded to servo pings:")
         for path in responsive:
             print(f"  - {path}")
-        print("[Pi] Please set SERIAL_PORT to the desired device. Falling back to configured path.")
+        if utils.SERIAL_PORT:
+            print("[Pi] Please set SERIAL_PORT to the desired device. Falling back to configured path.")
+        else:
+            print("[Pi] Please set SERIAL_PORT to the desired device.")
         return utils.SERIAL_PORT
 
-    print("[Pi] Serial auto-detect did not find a responsive device. Falling back to configured path.")
+    if utils.SERIAL_PORT:
+        print("[Pi] Serial auto-detect did not find a responsive device. Falling back to configured path.")
+    else:
+        print("[Pi] Serial auto-detect did not find a responsive device.")
     return utils.SERIAL_PORT
 
 def _is_jetson_platform() -> bool:
@@ -336,7 +321,14 @@ def _print_serial_port_help() -> None:
     Print platform-aware instructions to resolve serial access issues.
     Avoids Raspberry Pi–specific guidance on non-Pi systems (e.g., Jetson).
     """
-    if _is_jetson_platform():
+    if is_macos():
+        print("macOS hints:")
+        print("  - USB serial devices should appear as /dev/cu.* paths, not /dev/ttyUSB0.")
+        print("  - List detected adapters: ls -1 /dev/cu.*")
+        print("  - Get adapter details: python -m serial.tools.list_ports -v")
+        print("  - Use a data-capable USB cable and install the adapter driver if required.")
+        print("  - You can override detection with the SERIAL_PORT env var or --serial-port flag.")
+    elif _is_jetson_platform():
         print("Jetson hints:")
         print("  - Ensure your user is in the 'dialout' (and possibly 'tty') group:")
         print("    sudo usermod -aG dialout $USER && newgrp dialout")
@@ -403,6 +395,10 @@ def initialize_servos():
     resolved_port = _resolve_serial_port()
     if resolved_port:
         utils.SERIAL_PORT = resolved_port
+    else:
+        print("[Pi] ERROR: Could not resolve a serial port for the servo bus.")
+        _print_serial_port_help()
+        raise SystemExit(1)
 
     try:
         utils.ser = serial.Serial(utils.SERIAL_PORT, utils.BAUD_RATE, timeout=0.1)

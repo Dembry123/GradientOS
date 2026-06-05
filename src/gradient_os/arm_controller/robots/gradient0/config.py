@@ -18,6 +18,7 @@
 import math
 from typing import Optional
 
+from ...serial_ports import default_serial_port
 from ..base import RobotConfig
 
 
@@ -289,9 +290,9 @@ class Gradient0Config(RobotConfig):
     # =========================================================================
     
     @property
-    def default_serial_port(self) -> str:
+    def default_serial_port(self) -> Optional[str]:
         """Default serial port for USB-TTL adapter."""
-        return "/dev/ttyUSB0"
+        return default_serial_port()
     
     @property
     def udp_listen_ip(self) -> str:

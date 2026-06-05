@@ -14,7 +14,6 @@ import math
 import os
 import time
 import json
-import glob
 from typing import Optional, Callable
 import serial
 import numpy as np
@@ -22,6 +21,7 @@ import numpy as np
 from ...actuator_interface import ActuatorBackend
 from . import config
 from . import protocol
+from ...serial_ports import serial_candidate_devices
 
 
 class FeetechBackend(ActuatorBackend):
@@ -828,26 +828,7 @@ class FeetechBackend(ActuatorBackend):
         Returns:
             Optional[str]: Detected port path, or None if not found.
         """
-        # USB serial patterns to try
-        patterns = [
-            "/dev/serial/by-id/usb-*",
-            "/dev/ttyUSB*",
-            "/dev/ttyACM*",
-        ]
-        
-        candidates = []
-        seen = set()
-        
-        for pattern in patterns:
-            for path in sorted(glob.glob(pattern)):
-                try:
-                    realpath = os.path.realpath(path)
-                    if realpath in seen:
-                        continue
-                    seen.add(realpath)
-                    candidates.append(path)
-                except OSError:
-                    continue
+        candidates = serial_candidate_devices()
         
         if not candidates:
             print("[Feetech] No candidate serial devices found.")

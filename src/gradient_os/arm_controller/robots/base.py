@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from typing import Optional
 import math
 
+from ..serial_ports import default_serial_port
+
 
 class RobotConfig(ABC):
     """
@@ -386,14 +388,14 @@ class RobotConfig(ABC):
     # =========================================================================
     
     @property
-    def default_serial_port(self) -> str:
+    def default_serial_port(self) -> Optional[str]:
         """
         Default serial port path for actuator communication.
         
         Returns:
-            str: Serial port path (e.g., "/dev/ttyUSB0")
+            Optional[str]: Serial port path (e.g., "/dev/ttyUSB0"), or None to auto-detect.
         """
-        return "/dev/ttyUSB0"
+        return default_serial_port()
     
     # =========================================================================
     # UDP Configuration (for remote control)
@@ -587,4 +589,3 @@ class RobotConfig(ABC):
         if self.gripper_actuator_id is not None:
             return [aid for aid in self.actuator_ids if aid != self.gripper_actuator_id]
         return list(self.actuator_ids)
-

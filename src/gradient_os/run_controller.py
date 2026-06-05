@@ -146,7 +146,10 @@ Examples:
         print(f"[Controller] Serial port (from command line): {utils.SERIAL_PORT}")
     else:
         utils.SERIAL_PORT = selected_robot.default_serial_port
-        print(f"[Controller] Serial port (from robot config): {utils.SERIAL_PORT}")
+        if utils.SERIAL_PORT:
+            print(f"[Controller] Serial port (from robot config): {utils.SERIAL_PORT}")
+        else:
+            print("[Controller] Serial port: auto-detect")
 
     # ==========================================================================
     # Configure Servo Backend (MUST be done before using any servo-dependent modules)
