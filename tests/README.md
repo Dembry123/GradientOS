@@ -26,12 +26,12 @@ Pytest will automatically discover and run all test files (files named `test_*.p
 
 ## Test Descriptions
 
--   `test_protocol.py`: Contains low-level unit tests for the `servo_protocol.py` module. It verifies the correctness of fundamental operations like checksum calculation and the byte-level structure of `SYNC_WRITE` packets, ensuring that communication with the servos is formatted correctly.
+-   `test_protocol.py`: Contains low-level unit tests for `backends/feetech/protocol.py`. It verifies checksum calculation and Feetech packet structures.
 
--   `test_driver.py`: Includes unit tests for the `servo_driver.py` module, which acts as the hardware abstraction layer. These tests validate the conversion logic between abstract units (like radians) and raw servo values, and check that logical-to-physical transformations (like the J1 gear ratio) are applied correctly.
+-   `test_driver.py`: Includes unit tests for `FeetechBackend` logical-to-physical command mapping and backend write dispatch.
 
 -   `test_planning.py`: Focuses on unit testing the core algorithms within `trajectory_execution.py`. It specifically tests the path unwrapping and smoothing logic to ensure that generated joint-space trajectories are continuous and do not contain unnecessary "wrap-around" jumps.
 
 -   `test_solver.py`: An integration test for the C++ IKFast wrapper (`ikfast_wrapper.py`). It performs sanity checks to ensure that Forward Kinematics (FK) and Inverse Kinematics (IK) are consistent and that the batch IK solver can process a sequence of poses correctly.
 
--   `test_end_to_end.py`: Provides high-level integration tests that simulate the full control loop. It tests the system's behavior from receiving a UDP command to the final data being sent to the (mocked) serial port, verifying that all components work together as expected. 
+-   `test_end_to_end.py`: Provides high-level integration tests that simulate the full control loop, from receiving a UDP command to issuing backend actuator commands.

@@ -15,7 +15,7 @@ import os
 import json
 
 from . import utils
-from . import servo_driver
+from . import actuator_runtime as actuators
 from . import trajectory_execution
 
 
@@ -158,7 +158,7 @@ def _generate_joint_only_sine_path(base_q: list[float], joint_index: int, amplit
 
 
 def _move_to_zero_pose(frequency_hz: int = 100, duration_s: float = 1.5):
-    current_q = servo_driver.get_current_arm_state_rad(verbose=False)
+    current_q = actuators.get_joint_positions(verbose=False)
     if not current_q:
         return
     target_q = [0.0] * utils.NUM_LOGICAL_JOINTS
@@ -200,7 +200,7 @@ def tune_internal_pid_for_joint(
         print(f"[PID Tune] ERROR: Invalid logical joint index {logical_joint_index}")
         return {}
 
-    base_q = servo_driver.get_current_arm_state_rad(verbose=False)
+    base_q = actuators.get_joint_positions(verbose=False)
     if not base_q:
         print("[PID Tune] ERROR: Could not read current arm state.")
         return {}
@@ -256,7 +256,7 @@ def tune_internal_pid_for_joint(
                 for kd in kd_values:
                     print(f"[PID Tune] Sweep J{logical_joint_index+1}: Kp={kp}, Ki={ki}, Kd={kd}")
                     for sid in target_servo_ids:
-                        servo_driver.set_servo_pid_gains(sid, kp, ki, kd)
+                        actuators.set_pid_gains(sid, kp, ki, kd)
                         time.sleep(0.02)
                     telemetry = trajectory_execution._open_loop_executor_thread(
                         test_path, frequency_hz, diagnostics=True, return_telemetry=True
@@ -284,7 +284,7 @@ def tune_internal_pid_for_joint(
 
     if best["kp"] is not None:
         for sid in target_servo_ids:
-            servo_driver.set_servo_pid_gains(sid, int(best["kp"]), int(best["ki"]), int(best["kd"]))
+            actuators.set_pid_gains(sid, int(best["kp"]), int(best["ki"]), int(best["kd"]))
             time.sleep(0.02)
 
         # Persist per-servo best gains to config/pid_gains.json for next boot

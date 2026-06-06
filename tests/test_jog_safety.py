@@ -71,8 +71,8 @@ def test_jog_thread_rechecks_stop_before_servo_command(monkeypatch):
     )
 
     monkeypatch.setattr(
-        command_api.servo_driver,
-        "get_current_arm_state_rad",
+        command_api.actuators,
+        "get_joint_positions",
         lambda verbose=False: np.zeros(6),
     )
 
@@ -88,8 +88,8 @@ def test_jog_thread_rechecks_stop_before_servo_command(monkeypatch):
 
     servo_commands = []
     monkeypatch.setattr(
-        command_api.servo_driver,
-        "set_servo_positions",
+        command_api.actuators,
+        "set_joint_positions",
         lambda positions, speed, accel: servo_commands.append((positions, speed, accel)),
     )
     monkeypatch.setattr(command_api.time, "sleep", lambda seconds: None)

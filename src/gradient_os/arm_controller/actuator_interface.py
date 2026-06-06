@@ -217,15 +217,19 @@ class ActuatorBackend(ABC):
     @abstractmethod
     def sync_read_positions(
         self,
+        actuator_ids: Optional[list[int]] = None,
         timeout_s: Optional[float] = None,
     ) -> dict[int, int]:
         """
-        Read positions from all actuators in a single batch operation.
+        Read positions from actuators in a single batch operation.
         
         This is the fastest way to get feedback from multiple actuators for
         closed-loop control.
         
         Args:
+            actuator_ids: Optional subset of physical actuator IDs to read.
+                          When omitted, the backend should read its default
+                          feedback set.
             timeout_s: Optional timeout for the read operation in seconds.
         
         Returns:
@@ -440,6 +444,24 @@ class ActuatorBackend(ABC):
         """
         return False  # Default: not supported
 
+    def read_hardware_zero_offsets(
+        self,
+        actuator_ids: Optional[list[int]] = None,
+    ) -> dict[int, Optional[int]]:
+        """
+        Read actuator hardware zero offsets when the backend supports them.
+        """
+        return {}
+
+    def clear_hardware_zero_offsets(
+        self,
+        actuator_ids: Optional[list[int]] = None,
+    ) -> dict[int, bool]:
+        """
+        Clear actuator hardware zero offsets when the backend supports them.
+        """
+        return {}
+
 
 # =============================================================================
 # SimulationBackend - Now located in backends/simulation/backend.py
@@ -450,4 +472,3 @@ class ActuatorBackend(ABC):
 from .backends.simulation import SimulationBackend
 
 __all__ = ['ActuatorBackend', 'SimulationBackend']
-

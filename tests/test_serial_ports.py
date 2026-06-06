@@ -4,7 +4,7 @@ from gradient_os.arm_controller import serial_ports
 
 
 def test_macos_default_serial_port_prefers_cu_candidate(monkeypatch):
-    monkeypatch.setattr(serial_ports.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(serial_ports.platform, "system", lambda: "Darwin") 
     monkeypatch.setattr(
         serial_ports.glob,
         "glob",

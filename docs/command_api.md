@@ -6,7 +6,7 @@
 
 This module contains a `handle_...` function for every high-level action the robot can perform. These handlers are responsible for:
 1.  Validating and parsing the parameters for their respective commands.
-2.  Orchestrating calls to other modules (`trajectory_execution`, `servo_driver`, `ik_solver`) to execute the command.
+2.  Orchestrating calls to other modules (`trajectory_execution`, `actuator_runtime`, `ik_solver`) to execute the command.
 3.  Managing the robot's state via the `utils.py` module (e.g., starting and stopping trajectory threads).
 
 ---

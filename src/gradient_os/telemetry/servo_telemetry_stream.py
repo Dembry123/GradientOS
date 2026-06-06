@@ -5,7 +5,10 @@ import socket
 import time
 from typing import Dict, List, Optional, Tuple
 
-from ..arm_controller import servo_driver, servo_protocol, utils
+from ..arm_controller import actuator_runtime as actuators
+from ..arm_controller import robot_config, utils
+from ..arm_controller.backends import registry as backend_registry
+from ..arm_controller.robots import get_robot_config
 
 
 # Default human-readable labels for alarm bits. These may vary by firmware.
@@ -106,15 +109,32 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=0.0, help="Optional duration in seconds. 0 = run until Ctrl-C.")
     ap.add_argument("--udp", type=str, default=None, help="Optional UDP target host:port to publish JSON frames.")
     ap.add_argument("--stdout", action="store_true", help="Also print a compact line to stdout per frame.")
+    ap.add_argument("--robot", type=str, default="gradient0", help="Robot configuration to use. Default: gradient0.")
+    ap.add_argument("--serial-port", type=str, default=None, help="Override Feetech serial port.")
     args = ap.parse_args()
 
-    # Initialize servos and build ID set from present devices
-    servo_driver.initialize_servos()
+    selected_robot = get_robot_config(args.robot)
+    robot_config.set_active_robot(selected_robot)
+    utils.SERIAL_PORT = args.serial_port if args.serial_port else selected_robot.default_serial_port
+    backend_registry.set_active_backend("feetech")
+    utils._populate_servo_constants()
+    backend = backend_registry.create_backend(
+        "feetech",
+        selected_robot.get_config_dict(),
+        serial_port=utils.SERIAL_PORT,
+    )
+    backend_registry.set_active_backend_instance(backend)
+    if not backend.initialize():
+        print("[Pi Telemetry] Feetech backend failed to initialize. Exiting.")
+        return
+    actuators.sync_global_state_from_backend(backend)
+
     requested_ids = _parse_ids(args.ids, include_gripper=bool(args.include_gripper))
-    present = servo_protocol.get_present_servo_ids()
+    present = actuators.get_present_actuator_ids()
     servo_ids = [sid for sid in requested_ids if sid in present]
     if not servo_ids:
         print("[Pi Telemetry] No present servos match the requested IDs. Exiting.")
+        backend_registry.shutdown_backend()
         return
 
     # Prepare CSV
@@ -159,11 +179,11 @@ def main() -> None:
                 break
 
             # Block 1: 0x38..0x3F (8 bytes)
-            blk1 = servo_protocol.sync_read_block(servo_ids, start_address=0x38, data_len=8, timeout_s=0.05)
+            blk1 = actuators.sync_read_block(servo_ids, start_address=0x38, data_len=8, timeout_s=0.05)
             # Block 2: 0x41..0x45 (5 bytes)
-            blk2 = servo_protocol.sync_read_block(servo_ids, start_address=0x41, data_len=5, timeout_s=0.05)
+            blk2 = actuators.sync_read_block(servo_ids, start_address=0x41, data_len=5, timeout_s=0.05)
             # EEPROM alarms: 0x13..0x14 (2 bytes)
-            blk3 = servo_protocol.sync_read_block(servo_ids, start_address=0x13, data_len=2, timeout_s=0.05)
+            blk3 = actuators.sync_read_block(servo_ids, start_address=0x13, data_len=2, timeout_s=0.05)
 
             frame: Dict[int, dict] = {}
             for sid in servo_ids:
@@ -268,8 +288,8 @@ def main() -> None:
                 udp_sock.close()
             except Exception:
                 pass
+        backend_registry.shutdown_backend()
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,83 +1,89 @@
-import unittest
 import math
-from unittest import mock
 
-from gradient_os.arm_controller import servo_driver
-from gradient_os.arm_controller import utils
-from gradient_os.arm_controller import servo_protocol
-
-class TestServoDriver(unittest.TestCase):
-    """
-    Unit tests for the high-level servo driver functions.
-    These tests do not require a hardware connection.
-    """
-
-    def setUp(self) -> None:
-        utils.ser = mock.MagicMock()
-        servo_protocol.get_present_servo_ids().update(utils.SERVO_IDS)
-
-    def tearDown(self) -> None:
-        utils.ser = None
-        servo_protocol.get_present_servo_ids().clear()
-
-    def test_radian_to_raw_conversion(self) -> None:
-        """
-        Tests the conversion from raw servo values to radians, checking both a
-        direct-mapped and an inverted servo.
-        """
-        # Test a direct-mapped servo (e.g., servo index 0 for J1)
-        # Center value (2047) should correspond to ~0.0 rad
-        rad_val_center = servo_driver.servo_value_to_radians(2047, 0)
-        self.assertAlmostEqual(rad_val_center, 0.0, places=2)
-
-        # 3/4 value (3071) should correspond to ~+PI/2 rad
-        rad_val_pi_half = servo_driver.servo_value_to_radians(3071, 0)
-        self.assertAlmostEqual(rad_val_pi_half, -math.pi / 2, places=2)
-
-        # Test an inverted servo (servo index 7 for J5)
-        # Center value (2047) should still correspond to ~0.0 rad
-        rad_val_center_inv = servo_driver.servo_value_to_radians(2047, 7)
-        self.assertAlmostEqual(rad_val_center_inv, 0.0, places=2)
-
-        # 1/4 value (1023) for an inverted servo should correspond to ~+PI/2 rad
-        rad_val_pi_half_inv = servo_driver.servo_value_to_radians(1023, 7)
-        self.assertAlmostEqual(rad_val_pi_half_inv, math.pi / 2, places=2)
-
-    @mock.patch('gradient_os.arm_controller.servo_protocol.sync_write_goal_pos_speed_accel')
-    def test_j1_gear_ratio(self, mock_sync_write: mock.Mock) -> None:
-        """
-        Tests that a command to the logical Joint 1 results in a physical command
-        that is double the angle due to the 2:1 gear ratio.
-        """
-        # Command J1 to PI/4 radians (45 degrees)
-        # The physical servos should be commanded to PI/2 radians (90 degrees)
-        logical_angles = [math.pi / 4, 0, 0, 0, 0, 0]
-        
-        servo_driver.set_servo_positions(logical_angles, 100, 0)
-
-        # Get the arguments that sync_write was called with
-        call_args = mock_sync_write.call_args[0][0]
-        
-        # Find the command for the first servo of J1 (ID 10, index 0)
-        servo_10_command = next((cmd for cmd in call_args if cmd[0] == 10), None)
-        self.assertIsNotNone(servo_10_command)
-        
-        # Convert the raw command back to radians to check it
-        raw_pos_cmd = servo_10_command[1] # The position value
-        
-        # Convert raw value back to physical radians
-        # This uses the inverse logic of set_servo_positions
-        is_direct = utils._is_servo_direct_mapping(0)
-        normalized = raw_pos_cmd / 4095.0
-        if not is_direct:
-            normalized = 1.0 - normalized
-            
-        min_rad, max_rad = utils.EFFECTIVE_MAPPING_RANGES[0]
-        physical_angle_rad = normalized * (max_rad - min_rad) + min_rad
-
-        # The physical angle should be double the logical angle
-        self.assertAlmostEqual(physical_angle_rad, math.pi / 2, places=2)
+from gradient_os.arm_controller.backends.feetech import protocol
+from gradient_os.arm_controller.backends.feetech import config
+from gradient_os.arm_controller.backends.feetech.driver import FeetechBackend
 
 
-if __name__ == '__main__':
-    unittest.main() 
+def _backend() -> FeetechBackend:
+    backend = FeetechBackend(
+        {
+            "servo_ids": [10, 20, 21],
+            "logical_to_physical_map": {0: [0], 1: [1, 2]},
+            "inverted_servo_ids": {21},
+            "joint_limits_rad": [[-math.pi, math.pi], [-math.pi, math.pi]],
+            "master_offsets_rad": [0.0, 0.0],
+        }
+    )
+    backend._initialized = True
+    backend._present_servo_ids = {10, 20, 21}
+    backend._ser = object()
+    return backend
+
+
+def test_raw_to_joint_positions_handles_direct_and_inverted_actuators() -> None:
+    backend = _backend()
+
+    positions = backend.raw_to_joint_positions({
+        10: 2047,
+        20: 3071,
+        21: 1023,
+    })
+
+    assert math.isclose(positions[0], 0.0, abs_tol=0.01)
+    assert math.isclose(positions[1], math.pi / 2, abs_tol=0.01)
+
+
+def test_prepare_sync_write_commands_maps_logical_joints_to_physical_actuators() -> None:
+    backend = _backend()
+
+    commands = backend.prepare_sync_write_commands([math.pi / 2, 0.0], speed=100, accel=0)
+
+    by_id = {servo_id: raw for servo_id, raw, _speed, _accel in commands}
+    assert set(by_id) == {10, 20, 21}
+    assert by_id[10] == 3071
+    assert by_id[20] == 2048
+    assert by_id[21] == 2048
+
+
+def test_set_joint_positions_uses_feetech_protocol(monkeypatch) -> None:
+    backend = _backend()
+    writes = []
+    monkeypatch.setattr(protocol, "sync_write_goal_pos_speed_accel", lambda _ser, commands: writes.append(commands))
+
+    backend.set_joint_positions([math.pi / 2, 0.0], speed=100, acceleration=0)
+
+    assert writes
+    commanded_ids = {cmd[0] for cmd in writes[0]}
+    assert commanded_ids == {10, 20, 21}
+
+
+def test_clear_hardware_zero_offsets_writes_position_correction(monkeypatch) -> None:
+    backend = _backend()
+    calls = []
+
+    def write_byte(_ser, servo_id, register_address, value):
+        calls.append(("byte", servo_id, register_address, value))
+        return True
+
+    def write_word(_ser, servo_id, register_address, value):
+        calls.append(("word", servo_id, register_address, value))
+        return True
+
+    def read_word(_ser, servo_id, register_address):
+        calls.append(("read_word", servo_id, register_address, None))
+        return 0
+
+    monkeypatch.setattr(protocol, "write_register_byte", write_byte)
+    monkeypatch.setattr(protocol, "write_register_word", write_word)
+    monkeypatch.setattr(protocol, "read_register_word", read_word)
+
+    result = backend.clear_hardware_zero_offsets([10, 99])
+
+    assert result == {10: True, 99: False}
+    assert calls == [
+        ("byte", 10, config.SERVO_ADDR_WRITE_LOCK, 0),
+        ("word", 10, config.SERVO_ADDR_POSITION_CORRECTION, 0),
+        ("byte", 10, config.SERVO_ADDR_WRITE_LOCK, 1),
+        ("read_word", 10, config.SERVO_ADDR_POSITION_CORRECTION, None),
+    ]

@@ -25,11 +25,11 @@ This file contains numerous blocks of constants that define the robot's physical
 
 To allow different modules to share information about the robot's current state at runtime, a few global variables are managed here.
 
-*   **`ser`**: The global `pyserial` object representing the connection to the servos. It is initialized in `servo_driver.initialize_servos()` and used by `servo_protocol.py` for all read/write operations.
+*   **`ser`**: Optional legacy serial handle mirrored from the active backend when one exists. Production read/write operations should go through the active `ActuatorBackend`, usually via `actuator_runtime`.
 *   **`trajectory_state`**: A dictionary that holds the state of the motion system, including whether a trajectory is running (`is_running`), if a stop has been requested (`should_stop`), and a reference to the running motion `thread`. This is the core of the non-blocking architecture.
 *   **`current_logical_joint_angles_rad`**: A list of the six most recently commanded logical joint angles. This is used as the starting point for many IK calculations.
 
 ### Helper Functions
 
 *   **`_is_servo_direct_mapping(...)`**: A utility that returns `True` or `False` depending on whether a specific servo is mounted in a way that its raw value increases with its angle (direct) or decreases (inverted).
-*   **`_convert_numpy_to_list(...)`**: A recursive helper to convert data structures containing NumPy arrays into pure Python lists, which is necessary before saving them to a JSON file. 
+*   **`_convert_numpy_to_list(...)`**: A recursive helper to convert data structures containing NumPy arrays into pure Python lists, which is necessary before saving them to a JSON file.

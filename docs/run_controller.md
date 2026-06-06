@@ -6,7 +6,7 @@
 
 This script is the highest-level application script and serves as the sole entry point for running the robot arm. It is responsible for:
 1.  **Environment Setup:** It modifies the system path to ensure the `arm_controller` package can be imported correctly.
-2.  **Module Imports:** It imports all the necessary sub-modules from the `arm_controller` package (`command_api`, `servo_driver`, etc.).
+2.  **Module Imports:** It imports the controller modules and backend registry, then uses the active `ActuatorBackend` through `actuator_runtime`.
 3.  **Hardware Initialization:** It calls the functions required to open the serial port to the servos and set their initial configurations (PID gains, angle limits).
 4.  **State Synchronization:** It performs an initial read of all servo positions to ensure the software's internal understanding of the arm's state matches reality. This is a critical safety feature to prevent unexpected motion on startup.
 5.  **UDP Server Loop:** It starts the infinite `while` loop that listens for incoming UDP packets on the specified port.

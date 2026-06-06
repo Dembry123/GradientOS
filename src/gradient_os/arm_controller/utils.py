@@ -277,7 +277,8 @@ trajectory_state = {
 # Global Serial & State Objects
 # =============================================================================
 
-# Global serial object (managed by servo_driver.initialize_servos())
+# Optional serial object exposed for legacy tooling; runtime I/O belongs to the
+# active ActuatorBackend.
 ser: 'serial.Serial | None' = None
 
 # Global state for the arm's last known logical joint angles (in radians)
@@ -410,11 +411,14 @@ def get_actuator_backend():
     Get the currently active actuator backend instance.
     
     This function provides access to the actuator backend for advanced usage.
-    For most cases, use the functions in servo_driver.py instead.
+    For most cases, use arm_controller.actuator_runtime helpers instead.
     
     Returns:
         ActuatorBackend: The active backend, or None if not initialized.
     """
     # Import here to avoid circular dependency
-    from . import servo_driver
-    return getattr(servo_driver, '_actuator_backend', None)
+    from .backends import registry as backend_registry
+    try:
+        return backend_registry.get_active_backend()
+    except backend_registry.BackendInstanceNotSetError:
+        return None

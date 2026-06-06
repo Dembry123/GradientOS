@@ -2264,8 +2264,8 @@ Systemd integration:
   - add `AllowedCPUs=0 1` (or equivalent) in `arm-controller.service` and `gradient-api.service`.
 
 Important integration note:
-- The existing codebase’s `servo_driver` functions already prefer an `ActuatorBackend` when present.
-  - This means most command handlers can remain unchanged while we introduce the EtherCAT backend.
+- Production servo runtime calls now go through `actuator_runtime` and the active `ActuatorBackend`.
+  - This keeps command handlers backend-neutral while we introduce the EtherCAT backend.
 
 ### 15.9 RTCore build + deployment (appliance-friendly)
 Build system:
@@ -2285,8 +2285,8 @@ Versioning (freeze requirement):
   - `STATUS_HELLO.build_id_hash`
 
 ### 15.10 Compatibility/migration notes (current code state)
-- `servo_driver` already routes to the active backend for core operations like `set_servo_positions()` and `get_current_arm_state_rad()` when a backend instance is set.
-- Some legacy initialization paths in `run_controller.py` still call Feetech-specific init unconditionally; for EtherCAT we must gate those paths so the controller does not attempt to touch serial servos when `ethercat_rtcore` is selected.
+- `actuator_runtime` routes app-facing motion, feedback, calibration, telemetry, and maintenance calls to the active backend.
+- `run_controller.py` gates Feetech-specific startup behavior when `ethercat_rtcore` is selected so the controller does not attempt to touch serial servos.
 
 ### 15.11 `ethercat_rtcore` Python backend behavior (method-by-method)
 **Goal:** make the backend a thin, deterministic proxy to RTCore while satisfying the `ActuatorBackend` interface used by the existing codebase.
@@ -2602,6 +2602,5 @@ In CSP:
   - setpoints are fresh (IPC staleness checks)
 
 ---
-
 
 

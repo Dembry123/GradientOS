@@ -83,8 +83,12 @@ backend_registry.set_active_backend(servo_backend)
 # 5. Populate module-level constants from the active configuration
 utils._populate_servo_constants()
 
-# 6. Now safe to use servo operations
-servo_driver.initialize_servos()
+# 6. Create, initialize, and register the backend instance
+backend = backend_registry.create_backend(servo_backend, selected_robot.get_config_dict())
+backend_registry.set_active_backend_instance(backend)
+backend.initialize()
+
+# 7. Runtime code uses actuator_runtime or the active backend directly
 ```
 
 ## File Structure
@@ -107,19 +111,13 @@ arm_controller/
 │   │   ├── __init__.py
 │   │   ├── config.py            # Constants (registers, defaults, telemetry parsing)
 │   │   ├── protocol.py          # Low-level packet functions (INTERNAL)
-│   │   └── backend.py           # FeetechBackend(ActuatorBackend)
+│   │   └── driver.py            # FeetechBackend(ActuatorBackend)
 │   └── simulation/
 │       └── backend.py           # SimulationBackend (in-memory, no hardware)
 │
 ├── actuator_interface.py        # ActuatorBackend ABC + SimulationBackend
 │
-├── servo_protocol.py            # LEGACY: Feetech-specific protocol
-│                                # TODO: Move to backends/feetech/protocol.py
-│                                # Keep as thin dispatcher for backward compat
-│
-├── servo_driver.py              # High-level servo operations
-│                                # Uses robot_config for joint mapping
-│                                # Uses backend via servo_protocol (or registry)
+├── actuator_runtime.py          # App-facing active-backend helpers + state sync
 │
 ├── robot_config.py              # LEGACY: Module-level constants
 │                                # Now populated dynamically by set_active_robot()
@@ -302,27 +300,18 @@ class RobotConfig(ABC):
 ## Migration Path
 
 ### Current State
-- `servo_protocol.py` contains all Feetech-specific code (1264 lines)
-- Higher-level modules import directly from `servo_protocol`
-- Some abstraction in place via `__getattr__` for constants
+- Feetech packet code lives in `backends/feetech/protocol.py`.
+- Feetech serial runtime behavior lives in `backends/feetech/driver.py`.
+- Higher-level production modules use `actuator_runtime` / the active backend.
+- The package-level servo runtime shims have been removed. Scripts that need packet-level Feetech operations should import `backends/feetech/protocol.py`; application code should use `actuator_runtime` or the active backend.
 
 ### Target State
-1. Move `servo_protocol.py` content to `backends/feetech/protocol.py`
-2. Implement `FeetechBackend(ActuatorBackend)` in `backends/feetech/backend.py`
-3. `servo_protocol.py` becomes thin dispatcher:
-   ```python
-   from .backends import registry
-   
-   def ping(servo_id):
-       return registry.get_active_backend().ping(servo_id)
-   
-   def sync_read_positions(servo_ids, **kwargs):
-       return registry.get_active_backend().sync_read_positions(servo_ids, **kwargs)
-   ```
-4. Gradually update higher-level modules to use backend directly
+1. Move `servo_protocol.py` content to `backends/feetech/protocol.py` ✅
+2. Implement `FeetechBackend(ActuatorBackend)` in `backends/feetech/driver.py` ✅
+3. Remove the package-level servo compatibility shims after production and scripts migrate ✅
+4. Update higher-level modules to use backend directly ✅
 
 ### Backward Compatibility
-- Existing imports from `servo_protocol` continue to work
 - Existing imports from `robot_config` continue to work
 - No breaking changes to external interfaces (UDP commands, etc.)
 
@@ -389,15 +378,14 @@ class RobotConfig(ABC):
 
 | File | Lines | Status | Notes |
 |------|-------|--------|-------|
-| `servo_protocol.py` | 1264 | ⚠️ LEGACY | Feetech-specific, used directly by all modules |
-| `servo_driver.py` | 1021 | ⚠️ NEEDS UPDATE | Uses `servo_protocol` directly, mixes concerns |
-| `trajectory_execution.py` | 1092 | ⚠️ NEEDS UPDATE | Uses `servo_protocol` directly |
-| `command_api.py` | 1579 | ⚠️ NEEDS UPDATE | Uses `servo_protocol` directly |
-| `run_controller.py` | 929 | ⚠️ PARTIAL | Sets robot/backend, but uses old modules |
+| `actuator_runtime.py` | small | ✅ ACTIVE | App-facing helper layer over active `ActuatorBackend`; synchronizes `utils` state |
+| `trajectory_execution.py` | 1092 | ✅ MIGRATED | Uses `actuator_runtime` / active backend for sync read/write paths |
+| `command_api.py` | 1579 | ✅ MIGRATED | Uses `actuator_runtime` for motion, gripper, jog, and readback paths |
+| `run_controller.py` | 929 | ✅ MIGRATED | Creates/initializes backend and uses it directly; no serial fallback through old modules |
 | `backends/feetech/protocol.py` | 727 | ✅ NEW | Clean Feetech protocol implementation |
-| `backends/feetech/driver.py` | 835 | ✅ NEW | FeetechBackend class (unused) |
-| `backends/registry.py` | 183 | ⚠️ PARTIAL | Config-only, no backend instances |
-| `actuator_interface.py` | 617 | ⚠️ PARTIAL | ABC defined, SimulationBackend partial |
+| `backends/feetech/driver.py` | 835 | ✅ ACTIVE | FeetechBackend class used by runtime Feetech path |
+| `backends/registry.py` | 183 | ✅ ACTIVE | Config and backend instance registry |
+| `actuator_interface.py` | 617 | ✅ ACTIVE | Backend interface used by Feetech, simulation, and EtherCAT RTCore |
 | `robot_config.py` | 251 | ✅ DONE | Dynamic loading via set_active_robot() |
 | `utils.py` | 305 | ✅ DONE | Constants from registry via `_populate_servo_constants()` and `_populate_robot_constants()` |
 | `robots/base.py` | 589 | ✅ DONE | RobotConfig ABC complete |
@@ -442,16 +430,13 @@ class RobotConfig(ABC):
   ```
 
 - [x] **2.1.2** Migrate `initialize_servos()`:
-  - Current: Opens serial port, pings servos directly
-  - Target: Call `_get_backend().initialize()`
+  - Compatibility wrapper delegates to the active backend.
 
 - [x] **2.1.3** Migrate `set_servo_positions()`:
-  - Current: Builds commands, calls `servo_protocol.sync_write_goal_pos_speed_accel()`
-  - Target: Call `_get_backend().set_joint_positions()` or `sync_write()`
+  - Compatibility wrapper delegates to `actuator_runtime.set_joint_positions()`.
 
 - [x] **2.1.4** Migrate `get_current_arm_state_rad()`:
-  - Current: Calls `servo_protocol.sync_read_positions()`
-  - Target: Call `_get_backend().get_joint_positions()`
+  - Compatibility wrapper delegates to `actuator_runtime.get_joint_positions()`.
 
 - [x] **2.1.5** Migrate calibration functions:
   - `set_current_position_as_hardware_zero()` → `backend.set_current_position_as_zero()`
@@ -489,9 +474,9 @@ class RobotConfig(ABC):
 #### 2.3 command_api.py (Priority: MEDIUM) ✅ COMPLETE
 
 - [x] **2.3.1** Audit all `servo_protocol` and `servo_driver` calls
-- [x] **2.3.2** Remove direct `servo_protocol` import - all calls now go through `servo_driver`
-- [x] **2.3.3** Added `read_single_servo_position()` helper in `servo_driver.py`
-- [x] **2.3.4** Updated `set_single_servo_position_rads()` to use backend
+- [x] **2.3.2** Remove production direct `servo_protocol` and `servo_driver` usage; runtime calls go through `actuator_runtime` / active backend
+- [x] **2.3.3** Remove deprecated package-level servo shims after call sites migrated
+- [x] **2.3.4** Gripper writes use backend single-actuator APIs via `actuator_runtime`
 - [x] **2.3.5** Fixed `SimulationBackend` to properly handle servo ID to joint index mapping
 - [x] **2.3.6** Renamed utils functions for clarity:
   - `_populate_backend_constants()` → `_populate_servo_constants()`
@@ -499,38 +484,22 @@ class RobotConfig(ABC):
 
 #### 2.4 run_controller.py (Priority: MEDIUM) ✅ COMPLETE
 
-- [x] **2.4.1** Gripper initialization now uses `servo_driver.read_single_servo_position()`
+- [x] **2.4.1** Gripper initialization now uses backend gripper APIs through `actuator_runtime`
 - [x] **2.4.2** Telemetry loop updated to use backend if available:
   - Uses `backend.present_servo_ids` for servo list
   - Uses `backend.sync_read_block()` for telemetry data
-  - Falls back to `servo_protocol` if backend doesn't have method
-- [x] **2.4.3** Calibration mode now uses `servo_driver.read_single_servo_position()`
+  - Skips backend-specific block telemetry when the active backend does not support it
+- [x] **2.4.3** Calibration mode now uses backend single-actuator reads
 - [x] **2.4.4** FACTORY_RESET uses `backend.factory_reset_actuator()` and `backend.restart_actuator()`
 - [x] **2.4.5** GET_ALL_POSITIONS uses `backend.sync_read_positions()`
-- [x] **2.4.6** Remaining `servo_protocol` calls are fallbacks when backend lacks method
+- [x] **2.4.6** Removed production fallback through `servo_protocol`
 
-### Phase 3: Deprecate Old Modules ✅ COMPLETE
+### Phase 3: Remove Old Modules ✅ COMPLETE
 
-**Goal**: `servo_protocol.py` becomes thin wrapper, then removed
-
-- [x] **3.1** Made `servo_protocol.py` a dispatcher:
-  - Added `_get_backend()`, `_use_backend()`, `_warn_deprecated()` helpers
-  - Updated module header with deprecation notice
-  - Key functions now dispatch to backend when available:
-    - `ping()` → `backend.ping_actuator()`
-    - `read_servo_position()` → `backend.read_single_actuator_position()`
-    - `sync_read_positions()` → `backend.sync_read_positions()`
-    - `sync_write_goal_pos_speed_accel()` → `backend.sync_write()`
-    - `factory_reset_servo()` → `backend.factory_reset_actuator()`
-    - `restart_servo()` → `backend.restart_actuator()`
-    - `sync_read_block()` → `backend.sync_read_block()`
-  - All functions fall back to direct serial communication if backend unavailable
-
-- [x] **3.2** Added deprecation notices to all key functions via docstrings
-
-- [x] **3.3** All imports still work - backward compatible
-
-- [ ] **3.4** (Future) Remove `servo_protocol.py` when all usages are migrated to backend
+- [x] **3.1** Moved packet construction/parsing to `backends/feetech/protocol.py`
+- [x] **3.2** Migrated production runtime calls to `actuator_runtime` / active backend APIs
+- [x] **3.3** Removed package-level servo driver/protocol shims
+- [x] **3.4** Removed the old monkey-patch simulator entrypoint; use `backends/simulation/backend.py`
 
 ### Phase 4: Clean Up ✅ COMPLETE
 
@@ -546,10 +515,6 @@ class RobotConfig(ABC):
 - [x] **4.3** Updated `backends/__init__.py`:
   - Imports `SimulationBackend` from new location
   - All backends now follow consistent structure
-
-- [x] **4.4** Added deprecation notice to `sim_backend.py`:
-  - Old monkey-patching approach is deprecated
-  - Points users to new backend-based approach
 
 **Backward compatibility maintained:**
 - `from actuator_interface import SimulationBackend` still works
@@ -612,25 +577,6 @@ class RobotConfig(ABC):
 
 ---
 
-## Files to Create
+## Cleanup Status
 
-```
-backends/
-├── simulation/
-│   ├── __init__.py           # NEW
-│   └── backend.py            # MOVE from sim_backend.py
-```
-
-## Files to Modify
-
-- `backends/registry.py` - Add instance management
-- `backends/__init__.py` - Register backend classes
-- `servo_driver.py` - Use backend instance
-- `trajectory_execution.py` - Use backend instance
-- `command_api.py` - Use backend instance
-- `run_controller.py` - Create backend instance at startup
-
-## Files to Deprecate/Remove
-
-- `servo_protocol.py` - Convert to dispatcher, then remove
-- `sim_backend.py` - Move to `backends/simulation/`
+The package-level servo runtime shims and the archived monolithic controller have been removed. Backend-native maintenance scripts should live under `scripts/`; the old bulk zero-offset reset helper is now represented by `scripts/reset_servo_zero_offsets.py`.

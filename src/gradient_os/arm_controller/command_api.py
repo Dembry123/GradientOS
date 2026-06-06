@@ -19,7 +19,7 @@ except ImportError:
     trajectory_planner = None
 
 from . import utils
-from . import servo_driver
+from . import actuator_runtime as actuators
 from . import trajectory_execution
 from . import pid_tuner
 
@@ -69,7 +69,7 @@ def handle_translate_command(dx: float, dy: float, dz: float):
 
     # 5. Command the servos to the new angles
     #    Using default speed and acceleration for now. This could be made adjustable.
-    servo_driver.set_servo_positions(new_logical_joint_angles, utils.DEFAULT_SERVO_SPEED, utils.DEFAULT_SERVO_ACCELERATION_DEG_S2)
+    actuators.set_joint_positions(new_logical_joint_angles, utils.DEFAULT_SERVO_SPEED, utils.DEFAULT_SERVO_ACCELERATION_DEG_S2)
     print("[Pi IK] Sent new positions to servos.")
 
     # 6. Get and print the final position for verification
@@ -130,7 +130,7 @@ def handle_rotate_command(axis: str, angle_deg: float):
     print(f"[Pi IK] IK Solution Found (deg): {np.round(np.rad2deg(new_logical_joint_angles), 2)}")
 
     # 6. Command servos
-    servo_driver.set_servo_positions(new_logical_joint_angles, utils.DEFAULT_SERVO_SPEED, utils.DEFAULT_SERVO_ACCELERATION_DEG_S2)
+    actuators.set_joint_positions(new_logical_joint_angles, utils.DEFAULT_SERVO_SPEED, utils.DEFAULT_SERVO_ACCELERATION_DEG_S2)
     print("[Pi IK] Sent new positions to servos for rotation.")
 
     # 7. Get and print the final pose for verification
@@ -330,7 +330,7 @@ def handle_move_profiled(target_x: float,
         return
 
     # 1. Get current state from the physical robot to start the plan
-    initial_q = servo_driver.get_current_arm_state_rad(verbose=False)
+    initial_q = actuators.get_joint_positions(verbose=False)
     target_pos = np.array([target_x, target_y, target_z])
 
     diagnostics_enabled = (
@@ -392,7 +392,7 @@ def handle_move_profiled_relative(dx: float, dy: float, dz: float, speed: float 
     print(f"[Pi Smooth] Received MOVE_PROFILED_RELATIVE command: dX={dx}, dY={dy}, dZ={dz}, SpeedMultiplier={speed}")
 
     # 1. Get current position
-    current_q = servo_driver.get_current_arm_state_rad(verbose=False)
+    current_q = actuators.get_joint_positions(verbose=False)
     start_pos = ik_solver.get_fk(current_q)
     if start_pos is None:
         print("[Pi Smooth] ERROR: Cannot start relative move, failed to get current position.")
@@ -831,10 +831,10 @@ def _force_stop_jog_controller(join_timeout_s: float = 0.5):
 
 
 def _brake_to_current_position(reason: str) -> bool:
-    current_angles = servo_driver.get_current_arm_state_rad(verbose=False)
+    current_angles = actuators.get_joint_positions(verbose=False)
     if current_angles:
         print(f"[Jog] Brake to current position ({reason}): {np.round(current_angles, 3)}")
-        servo_driver.set_servo_positions(current_angles, 0, 100)
+        actuators.set_joint_positions(current_angles, 0, 100)
         _write_jog_diag(
             "brake",
             force=utils.trajectory_state.get("jog_debug", False),
@@ -902,7 +902,7 @@ def handle_move_to_position_absolute(x: float, y: float, z: float):
 
     # 4. Command the servos to the new angles
     #    Using default speed and acceleration for now. This could be made adjustable.
-    servo_driver.set_servo_positions(new_logical_joint_angles, utils.DEFAULT_SERVO_SPEED, utils.DEFAULT_SERVO_ACCELERATION_DEG_S2)
+    actuators.set_joint_positions(new_logical_joint_angles, utils.DEFAULT_SERVO_SPEED, utils.DEFAULT_SERVO_ACCELERATION_DEG_S2)
     print("[Pi IK] Sent new positions to servos.")
 
     # 5. Get and print the final position for verification
@@ -921,7 +921,7 @@ def handle_get_position(sock: 'socket.socket', addr: tuple):
     print(f"[Pi] Received GET_POSITION from {addr}.")
 
     # Fetch the latest joint angles directly from the physical servos
-    current_angles = servo_driver.get_current_arm_state_rad(verbose=False)
+    current_angles = actuators.get_joint_positions(verbose=False)
     
     # Get the current full pose using Forward Kinematics (matrix)
     pose_mx = ik_solver.get_fk_matrix(current_angles)
@@ -1007,7 +1007,7 @@ def handle_move_line(target_x: float, target_y: float, target_z: float, velocity
 def handle_move_line_relative(dx: float, dy: float, dz: float, speed: float = 1.0, closed_loop: bool = True):
     """Convenience wrapper that calls the main profiled move handler, defaulting to closed-loop."""
     utils.trajectory_state["should_stop"] = False # Reset stop flag on new move
-    current_q = servo_driver.get_current_arm_state_rad(verbose=False)
+    current_q = actuators.get_joint_positions(verbose=False)
     if current_q is None:
         print("[Pi Smooth] ERROR: Cannot start relative move, failed to get current position.")
         return
@@ -1104,8 +1104,8 @@ def handle_set_gripper_state(angle_deg: float, speed: int = 50, accel: int = 0):
         return
 
     # Use the existing single-servo write function
-    servo_driver.set_single_servo_position_rads(
-        servo_id=utils.SERVO_ID_GRIPPER,
+    actuators.set_single_actuator_position(
+        actuator_id=utils.SERVO_ID_GRIPPER,
         position_rad=angle_rad,
         speed=speed,
         accel=accel
@@ -1129,29 +1129,15 @@ def handle_get_gripper_state(sock: 'socket.socket', addr: tuple):
 
     print(f"[Controller] Received GET_GRIPPER_STATE from {addr}.")
     
-    # Read the raw position from the servo (uses backend if available)
-    raw_pos = servo_driver.read_single_servo_position(utils.SERVO_ID_GRIPPER)
+    raw_pos = actuators.read_single_actuator_position(utils.SERVO_ID_GRIPPER)
+    angle_rad = actuators.get_gripper_position()
     
-    if raw_pos is not None:
-        # Convert raw position to angle in degrees
-        # This requires finding the correct config index for the gripper
-        try:
-            gripper_config_index = utils.SERVO_IDS.index(utils.SERVO_ID_GRIPPER)
-            angle_rad = servo_driver.raw_to_angle_rad(raw_pos, gripper_config_index)
-            angle_deg = np.rad2deg(angle_rad)
-            
-            # Update global state as well
-            utils.current_gripper_angle_rad = angle_rad
-
-            reply = f"GRIPPER_STATE,{angle_deg:.2f},{raw_pos}"
-            print(f"[Controller] Sending gripper state: {reply}")
-            sock.sendto(reply.encode("utf-8"), addr)
-        except ValueError:
-            print("[Controller] ERROR: Gripper servo ID not found in SERVO_IDS list.")
-            sock.sendto("ERROR,GRIPPER_ID_NOT_CONFIGURED".encode("utf-8"), addr)
-        except Exception as e:
-            print(f"[Controller] ERROR: Could not convert raw position to angle: {e}")
-            sock.sendto(f"ERROR,CONVERSION_FAILED".encode("utf-8"), addr)
+    if angle_rad is not None:
+        angle_deg = np.rad2deg(angle_rad)
+        raw_for_reply = raw_pos if raw_pos is not None else "UNKNOWN"
+        reply = f"GRIPPER_STATE,{angle_deg:.2f},{raw_for_reply}"
+        print(f"[Controller] Sending gripper state: {reply}")
+        sock.sendto(reply.encode("utf-8"), addr)
     else:
         print("[Controller] ERROR: Failed to read gripper position.")
         sock.sendto("ERROR,READ_FAILED".encode("utf-8"), addr)
@@ -1332,8 +1318,8 @@ def _apply_jog_gripper_velocity(dt: float) -> bool:
             print("[Jog] NOTE: Gripper target clamped to limits.")
 
         speed_scaled = max(100, min(800, int(abs(rate_deg_s) * 4 + 100)))
-        servo_driver.set_single_servo_position_rads(
-            servo_id=utils.SERVO_ID_GRIPPER,
+        actuators.set_single_actuator_position(
+            actuator_id=utils.SERVO_ID_GRIPPER,
             position_rad=target_rad,
             speed=speed_scaled,
             accel=0,
@@ -1355,7 +1341,7 @@ def _jog_controller_thread():
     print("[Jog] Jog controller thread started.")
     
     # Get initial state
-    q_current = servo_driver.get_current_arm_state_rad(verbose=False)
+    q_current = actuators.get_joint_positions(verbose=False)
     
     last_loop_time = time.monotonic()
     
@@ -1380,7 +1366,7 @@ def _jog_controller_thread():
                 time.sleep(sleep_time)
             continue
         elif was_paused_for_motion:
-            fresh_q = servo_driver.get_current_arm_state_rad(verbose=False)
+            fresh_q = actuators.get_joint_positions(verbose=False)
             if fresh_q is not None:
                 q_current = fresh_q
             last_loop_time = time.monotonic()
@@ -1520,7 +1506,7 @@ def _jog_controller_thread():
                         "[Jog] WARNING: Rejecting IK jog step with large joint jump "
                         f"{max_abs_step:.3f} rad."
                     )
-                    actual_angles = servo_driver.get_current_arm_state_rad(verbose=False)
+                    actual_angles = actuators.get_joint_positions(verbose=False)
                     _write_jog_diag(
                         "joint_jump_rejected",
                         force=True,
@@ -1568,7 +1554,7 @@ def _jog_controller_thread():
                         time.sleep(sleep_time)
                     continue
 
-                servo_driver.set_servo_positions(q_clamped, 800, 0)
+                actuators.set_joint_positions(q_clamped, 800, 0)
                 actual_angles = None
                 diag_count = int(utils.trajectory_state.get("jog_diag_sample_count", 0)) + 1
                 utils.trajectory_state["jog_diag_sample_count"] = diag_count
@@ -1576,7 +1562,7 @@ def _jog_controller_thread():
                     utils.trajectory_state.get("jog_debug", False)
                     and diag_count % JOG_DIAG_SERVO_SAMPLE_INTERVAL == 0
                 ):
-                    actual_angles = servo_driver.get_current_arm_state_rad(verbose=False)
+                    actual_angles = actuators.get_joint_positions(verbose=False)
                 _write_jog_diag(
                     "ik_step",
                     current_position_m=current_position,
@@ -1781,7 +1767,7 @@ def handle_record_position():
         return
 
     # Query current joint angles and FK
-    current_q = servo_driver.get_current_arm_state_rad(verbose=False)
+    current_q = actuators.get_joint_positions(verbose=False)
     pose_matrix = ik_solver.get_fk_matrix(current_q)
     if pose_matrix is None:
         print("[Recorder] ERROR: FK failed – cannot record point.")

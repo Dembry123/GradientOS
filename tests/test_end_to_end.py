@@ -6,13 +6,11 @@ import threading
 import errno
 import time
 
-# Mock the serial and scipy modules before importing the controller
 from unittest.mock import MagicMock, patch
-sys.modules['serial'] = MagicMock()
-sys.modules['scipy.signal'] = MagicMock()
 
 from gradient_os.run_controller import main as run_controller_main
 from gradient_os.arm_controller import utils
+from gradient_os.arm_controller.backends.simulation.backend import SimulationBackend
 
 class TestEndToEnd(unittest.TestCase):
     """
@@ -29,45 +27,32 @@ class TestEndToEnd(unittest.TestCase):
             "thread": None
         }
 
-    @patch('gradient_os.arm_controller.servo_driver._resolve_serial_port', return_value='/dev/ttyUSB0')
-    @patch('gradient_os.arm_controller.servo_driver.servo_protocol.ping', return_value=True)
-    @patch('gradient_os.arm_controller.servo_driver.servo_protocol.sync_write_goal_pos_speed_accel')
-    @patch('gradient_os.arm_controller.servo_driver.servo_protocol.sync_read_positions')
     @patch('gradient_os.ik_solver.solve_ik_path_batch')
-    @patch('gradient_os.arm_controller.servo_driver.serial.Serial')
     def test_move_line_command_to_serial_output(self,
-                                                mock_serial_class: MagicMock,
-                                                mock_solve_ik: MagicMock,
-                                                mock_sync_read: MagicMock,
-                                                mock_sync_write: MagicMock,
-                                                _mock_ping: MagicMock,
-                                                _mock_resolve: MagicMock) -> None:
+                                                mock_solve_ik: MagicMock) -> None:
         """
-        Tests the full pipeline from a MOVE_LINE UDP command to the final
-        serial packet being written.
+        Tests the full pipeline from a MOVE_LINE UDP command to backend motion output.
         """
         # 1. Configure Mocks
-        from gradient_os.arm_controller import servo_protocol
-
-        # Mock the serial port to capture written data
-        mock_serial_instance = MagicMock()
-        mock_serial_class.return_value = mock_serial_instance
-
         # Mock the IK solver to return a simple, predictable path
         mock_solve_ik.return_value = [
             [0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
             [0.2, 0.2, 0.2, 0.2, 0.2, 0.2],
         ]
-        
-        # Mock sync_read to return a valid dictionary of positions
-        # This is needed by the closed-loop executor
-        mock_sync_read.return_value = {id: 2047 for id in utils.SERVO_IDS}
-
-        # Ensure the servo presence cache is populated for Sync Write
-        servo_protocol.get_present_servo_ids().update(utils.SERVO_IDS)
 
         # 2. Start the controller main loop in a background thread
-        with patch.object(sys, "argv", ["gradient-controller"]):
+        sync_write_calls = []
+        original_sync_write = SimulationBackend.sync_write
+
+        def recording_sync_write(backend_self, commands):
+            sync_write_calls.append(commands)
+            return original_sync_write(backend_self, commands)
+
+        sync_write_patcher = patch.object(SimulationBackend, "sync_write", recording_sync_write)
+        sync_write_patcher.start()
+        self.addCleanup(sync_write_patcher.stop)
+
+        with patch.object(sys, "argv", ["gradient-controller", "--sim"]):
             controller_thread = threading.Thread(target=run_controller_main, daemon=True)
             controller_thread.start()
             time.sleep(1.5) # Give the server time to start
@@ -94,17 +79,21 @@ class TestEndToEnd(unittest.TestCase):
                 else:
                     raise
             for _ in range(10):
-                if mock_sync_write.called:
+                if sync_write_calls:
                     break
                 time.sleep(0.2)
 
-        # 4. Assert that the controller attempted a sync write with servo commands
-        self.assertTrue(mock_sync_write.called, "Controller never issued a sync write.")
-        sent_commands = mock_sync_write.call_args_list[0][0][0]
+        # 4. Assert that the controller attempted backend sync writes with actuator commands
+        self.assertTrue(sync_write_calls, "Controller never issued a backend sync write.")
+        sent_commands = sync_write_calls[0]
 
         commanded_ids = {cmd[0] for cmd in sent_commands}
         expected_ids = set(utils.SERVO_IDS[:-1])  # Gripper may not be commanded in every move
-        self.assertTrue(expected_ids.issubset(commanded_ids), "Missing arm servo commands in sync write.")
+        expected_sim_indices = set(range(utils.NUM_LOGICAL_JOINTS))
+        self.assertTrue(
+            expected_ids.issubset(commanded_ids) or expected_sim_indices.issubset(commanded_ids),
+            "Missing arm actuator commands in backend sync write.",
+        )
 
         # 6. Stop the controller
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:

@@ -9,8 +9,7 @@
 # - robots/: Robot-specific configurations (gradient0, gradient0_5, etc.)
 # - robot_config.py: Backward-compatible config re-exports
 # - utils.py: Shared utilities and global state (backward-compatible)
-# - servo_driver.py: High-level servo control (backward-compatible)
-# - servo_protocol.py: Low-level protocol (backward-compatible, delegates to backends)
+# - actuator_runtime.py: App-facing helpers around the active ActuatorBackend
 # - command_api.py: UDP command handlers
 # - trajectory_execution.py: Trajectory planning and execution
 #
@@ -42,10 +41,9 @@ from .robots import RobotConfig, Gradient0Config, get_robot_config, list_availab
 # Import backward-compatible robot config module
 from . import robot_config
 
-# Import backward-compatible modules
+# Import runtime modules
+from . import actuator_runtime
 from . import utils
-from . import servo_driver
-from . import servo_protocol
 from . import command_api
 from . import trajectory_execution
 
@@ -62,10 +60,9 @@ __all__ = [
     'list_available_robots',
     # Legacy configuration module
     'robot_config',
-    # Legacy modules (backward compatible)
+    # Runtime and command modules
+    'actuator_runtime',
     'utils',
-    'servo_driver',
-    'servo_protocol',
     'command_api',
     'trajectory_execution',
 ]

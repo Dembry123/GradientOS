@@ -23,29 +23,22 @@ except ImportError:
     trajectory_planner = None
 
 from . import utils
-from . import servo_driver
-from . import servo_protocol
+from . import actuator_runtime as actuators
 from . import robot_config
-from .backends import registry as backend_registry
-from .actuator_interface import ActuatorBackend
 
 
-# =============================================================================
-# Backend Accessor Functions
-# =============================================================================
+def _raw_to_physical_angle(raw_value: int, physical_servo_config_index: int) -> float:
+    """Convert a raw actuator value into a configured physical servo angle."""
+    if raw_value is None:
+        return 0.0
+    servo_value = max(0, min(utils.ENCODER_RESOLUTION, int(raw_value)))
+    min_map_rad, max_map_rad = utils.EFFECTIVE_MAPPING_RANGES[physical_servo_config_index]
 
-def _get_backend() -> Optional[ActuatorBackend]:
-    """Returns the active ActuatorBackend instance, or None if not set."""
-    try:
-        return backend_registry.get_active_backend()
-    except backend_registry.BackendInstanceNotSetError:
-        return None
+    normalized = servo_value / utils.ENCODER_RESOLUTION
+    if not utils._is_servo_direct_mapping(physical_servo_config_index):
+        normalized = 1.0 - normalized
 
-
-def _use_backend() -> bool:
-    """Returns True if an ActuatorBackend instance is active and initialized."""
-    backend = _get_backend()
-    return backend is not None and backend.is_initialized
+    return normalized * (max_map_rad - min_map_rad) + min_map_rad
 
 
 def _build_primary_feedback_ids() -> list[int]:
@@ -682,9 +675,7 @@ def _trajectory_executor_thread(planned_steps: list[dict], should_loop: bool):
                     _execute_joint_path(step['path'], step['freq'])
                 elif step['type'] == 'joint_move':
                     print(f"[Pi Execute] Moving joints to target configuration and waiting {step['duration']}s.")
-                    servo_driver.set_servo_positions(step['target_q'], step['speed'], 0)
-                    # Update global state immediately
-                    utils.current_logical_joint_angles_rad = step['target_q']
+                    actuators.set_joint_positions(step['target_q'], step['speed'], 0)
                     # Make joint_move interruptible with correct timing
                     end_time = time.monotonic() + step['duration']
                     while not utils.trajectory_state["should_stop"] and time.monotonic() < end_time:
@@ -742,7 +733,7 @@ def _open_loop_executor_thread(
     # Pre-allocate Sync-Write command buffers
     # ----------------------------------------------
     precomputed_cmds: list[list[tuple[int,int,int,int]]] = [
-        servo_driver.logical_q_to_syncwrite_tuple(q, utils.ENCODER_RESOLUTION, 0) for q in joint_path
+        actuators.prepare_sync_write_commands(q, utils.ENCODER_RESOLUTION, 0) for q in joint_path
     ]
 
     # ----------------------------------------------
@@ -766,12 +757,7 @@ def _open_loop_executor_thread(
 
             # --- Actuation (WRITE) ---
             w_t0 = time.perf_counter()
-            backend = _get_backend()
-            if backend and _use_backend():
-                # Backend expects a list of (servo_id, position, speed, accel) tuples.
-                backend.sync_write(cmd)
-            else:
-                servo_protocol.sync_write_goal_pos_speed_accel(cmd)
+            actuators.sync_write(cmd)
             _write_durations.append(time.perf_counter() - w_t0)
 
             # --- Timing / sleep ---
@@ -786,7 +772,7 @@ def _open_loop_executor_thread(
             if diagnostics_enabled:
                 # For diagnostics, read back the position to calculate tracking error.
                 # This adds overhead and is NOT part of a true open-loop system.
-                actual_q = servo_driver.get_current_arm_state_rad(verbose=False)
+                actual_q = actuators.get_joint_positions(verbose=False)
                 target_q = joint_path[i]
                 for j_idx in range(utils.NUM_LOGICAL_JOINTS):
                     error = target_q[j_idx] - actual_q[j_idx]
@@ -927,15 +913,10 @@ def _closed_loop_executor_thread(
             # Use a fixed but small timeout to ensure full packets arrive; setting
             # too low leads to intermittent Sync Read failures.
             per_cycle_timeout = max(0.01, time_step * 0.8)
-            backend = _get_backend()
-            if backend and _use_backend():
-                raw_positions = backend.sync_read_positions(timeout_s=per_cycle_timeout)
-            else:
-                raw_positions = servo_protocol.sync_read_positions(
-                    PRIMARY_FB_IDS,
-                    timeout_s=per_cycle_timeout,
-                    poll_delay_s=0.0,
-                )
+            raw_positions = actuators.sync_read_positions(
+                actuator_ids=PRIMARY_FB_IDS,
+                timeout_s=per_cycle_timeout,
+            )
             _read_durations.append(time.perf_counter() - read_t0)
 
             # ------------------------------------------------------------
@@ -970,7 +951,7 @@ def _closed_loop_executor_thread(
                 if primary_id in raw_positions and secondary_id not in raw_positions:
                     primary_idx = utils.SERVO_IDS.index(primary_id)
                     secondary_idx = utils.SERVO_IDS.index(secondary_id)
-                    angle_rad = servo_driver.servo_value_to_radians(raw_positions[primary_id], primary_idx)
+                    angle_rad = _raw_to_physical_angle(raw_positions[primary_id], primary_idx)
                     raw_positions[secondary_id] = _angle_to_raw(angle_rad, secondary_idx)
 
             # Record target vs actual angles per logical joint using primary IDs
@@ -983,7 +964,7 @@ def _closed_loop_executor_thread(
                     primary_id = primary_ids.get(logical_joint_index)
                     if primary_id and primary_id in raw_positions:
                         config_index = utils.SERVO_IDS.index(primary_id)
-                        actual_angle = servo_driver.servo_value_to_radians(raw_positions[primary_id], config_index)
+                        actual_angle = _raw_to_physical_angle(raw_positions[primary_id], config_index)
                         # Undo master offset to get logical angle
                         actual_angle -= utils.LOGICAL_JOINT_MASTER_OFFSETS_RAD[logical_joint_index]
                         _actual_angles_per_joint[logical_joint_index].append(actual_angle)
@@ -1021,7 +1002,7 @@ def _closed_loop_executor_thread(
                         print(f"[Pi CLC] WARNING: Missing feedback for servo {servo_id}. Skipping correction.")
                         continue # Skip this servo if feedback failed
                     
-                    actual_physical_angle_rad = servo_driver.servo_value_to_radians(actual_raw_pos, physical_servo_config_index)
+                    actual_physical_angle_rad = _raw_to_physical_angle(actual_raw_pos, physical_servo_config_index)
 
                     # 2. Calculate the error
                     error_rad = target_physical_angle_rad - actual_physical_angle_rad
@@ -1065,12 +1046,7 @@ def _closed_loop_executor_thread(
             # --- Actuation (Write) ---
             if commands_for_sync_write:
                 write_t0 = time.perf_counter()
-                backend = _get_backend()
-                if backend and _use_backend():
-                    # Backend expects a list of (servo_id, position, speed, accel) tuples.
-                    backend.sync_write(commands_for_sync_write)
-                else:
-                    servo_protocol.sync_write_goal_pos_speed_accel(commands_for_sync_write)
+                actuators.sync_write(commands_for_sync_write)
                 _write_durations.append(time.perf_counter() - write_t0)
             else:
                 _write_durations.append(0.0)
@@ -1128,12 +1104,7 @@ def _closed_loop_executor_thread(
             # ------------------
             if diagnostics_enabled:
                 session_id = utils.trajectory_state.get('diagnostics_session_id')
-                # Get sync profiles from backend if available, else from servo_protocol
-                backend = _get_backend()
-                if backend and _use_backend() and hasattr(backend, 'get_sync_profiles'):
-                    sync_profiles = backend.get_sync_profiles()
-                else:
-                    sync_profiles = servo_protocol.get_sync_profiles()
+                sync_profiles = actuators.get_sync_profiles()
                 _save_executor_diagnostics_charts(
                     mode="closed_loop",
                     session_id=session_id,
@@ -1192,4 +1163,3 @@ def _execute_joint_path(joint_path: list[list[float]], frequency: int):
         diagnostics=diagnostics_enabled,
         owns_trajectory_state=False,
     )
-

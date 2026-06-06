@@ -181,10 +181,14 @@ class SimulationBackend(ActuatorBackend):
 
         self._update_logical_positions_from_raw()
     
-    def sync_read_positions(self, servo_ids: list[int] = None, timeout_s: Optional[float] = None) -> dict[int, int]:
+    def sync_read_positions(
+        self,
+        actuator_ids: Optional[list[int]] = None,
+        timeout_s: Optional[float] = None,
+    ) -> dict[int, int]:
         # Return cached raw values for requested actuator IDs.
         result = {}
-        target_ids = servo_ids if servo_ids else list(self._actuator_ids)
+        target_ids = actuator_ids if actuator_ids else list(self._actuator_ids)
         for servo_id in target_ids:
             sid = int(servo_id)
             if sid in self._raw_positions:
@@ -303,6 +307,9 @@ class SimulationBackend(ActuatorBackend):
     def ping_actuator(self, actuator_id: int) -> bool:
         return actuator_id in self.get_present_actuator_ids()
 
+    def get_sync_profiles(self) -> list[tuple[float, float, float]]:
+        return []
+
     def _initialize_raw_cache(self) -> None:
         self._raw_positions.clear()
         for servo_id in self._actuator_ids:
@@ -386,4 +393,3 @@ class SimulationBackend(ActuatorBackend):
                 self._gripper_position,
                 int(self._gripper_id),
             )
-

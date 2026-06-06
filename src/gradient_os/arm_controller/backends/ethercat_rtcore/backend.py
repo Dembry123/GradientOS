@@ -283,12 +283,21 @@ class EthercatRTCoreBackend(ActuatorBackend):
 
         self.set_joint_positions(positions_rad, speed=0.0, acceleration=0.0)
 
-    def sync_read_positions(self, timeout_s: Optional[float] = None) -> dict[int, int]:
+    def sync_read_positions(
+        self,
+        actuator_ids: Optional[list[int]] = None,
+        timeout_s: Optional[float] = None,
+    ) -> dict[int, int]:
         # Return last known raw counts for each exposed axis (index -> pos_counts).
         if not self._connected:
             return {}
 
-        return {i: int(self._axis_counts[i]) for i in range(self._rt_num_axes)}
+        axis_ids = actuator_ids if actuator_ids is not None else list(range(self._rt_num_axes))
+        return {
+            int(i): int(self._axis_counts[int(i)])
+            for i in axis_ids
+            if 0 <= int(i) < self._rt_num_axes
+        }
 
     def raw_to_joint_positions(self, raw_positions: dict[int, int]) -> list[float]:
         # Until scaling is implemented, return current joint setpoint.
@@ -706,4 +715,3 @@ class EthercatRTCoreBackend(ActuatorBackend):
                 os.write(self._cmd_eventfd, struct.pack("<Q", 1))
             except Exception:
                 pass
-

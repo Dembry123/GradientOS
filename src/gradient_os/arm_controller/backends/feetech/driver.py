@@ -374,9 +374,13 @@ class FeetechBackend(ActuatorBackend):
             return
         protocol.sync_write_goal_pos_speed_accel(self._ser, commands)
     
-    def sync_read_positions(self, timeout_s: Optional[float] = None) -> dict[int, int]:
+    def sync_read_positions(
+        self,
+        actuator_ids: Optional[list[int]] = None,
+        timeout_s: Optional[float] = None,
+    ) -> dict[int, int]:
         """
-        Batch read positions from all arm servos.
+        Batch read positions from arm servos.
         
         Returns:
             Dict mapping servo_id to raw position value.
@@ -384,10 +388,16 @@ class FeetechBackend(ActuatorBackend):
         if not self._initialized:
             return {}
         
-        arm_servo_ids = [
-            sid for sid in self._servo_ids 
-            if sid in self._present_servo_ids and sid != self._gripper_servo_id
-        ]
+        if actuator_ids is None:
+            arm_servo_ids = [
+                sid for sid in self._servo_ids
+                if sid in self._present_servo_ids and sid != self._gripper_servo_id
+            ]
+        else:
+            arm_servo_ids = [
+                sid for sid in actuator_ids
+                if sid in self._present_servo_ids and sid != self._gripper_servo_id
+            ]
         
         return protocol.sync_read_positions(
             self._ser,
@@ -395,6 +405,10 @@ class FeetechBackend(ActuatorBackend):
             timeout_s=timeout_s,
             alert_callback=self._alert_callback,
         )
+
+    def get_sync_profiles(self) -> list[tuple[float, float, float]]:
+        """Return and clear Feetech sync-read timing diagnostics."""
+        return protocol.get_sync_profiles()
 
     def sync_read_block(
         self,
@@ -516,6 +530,100 @@ class FeetechBackend(ActuatorBackend):
         if not self._initialized:
             return None
         return protocol.read_position(self._ser, actuator_id, self._alert_callback)
+
+    def read_hardware_zero_offsets(
+        self,
+        actuator_ids: Optional[list[int]] = None,
+    ) -> dict[int, Optional[int]]:
+        """Read Feetech position-correction registers for diagnostics."""
+        if not self._initialized:
+            return {}
+
+        target_ids = actuator_ids if actuator_ids is not None else sorted(self._present_servo_ids)
+        offsets: dict[int, Optional[int]] = {}
+        for actuator_id in target_ids:
+            if actuator_id not in self._present_servo_ids:
+                continue
+            offset = protocol.read_register_word(
+                self._ser,
+                actuator_id,
+                config.SERVO_ADDR_POSITION_CORRECTION,
+            )
+            if offset is not None and offset > 32767:
+                offset -= 65536
+            offsets[actuator_id] = offset
+            time.sleep(0.01)
+        return offsets
+
+    def clear_hardware_zero_offsets(
+        self,
+        actuator_ids: Optional[list[int]] = None,
+    ) -> dict[int, bool]:
+        """Clear Feetech position-correction registers without a factory reset."""
+        if not self._initialized:
+            return {}
+
+        target_ids = actuator_ids if actuator_ids is not None else sorted(self._present_servo_ids)
+        results: dict[int, bool] = {}
+
+        for actuator_id in target_ids:
+            actuator_id = int(actuator_id)
+            if actuator_id not in self._present_servo_ids:
+                results[actuator_id] = False
+                continue
+
+            unlocked = False
+            try:
+                unlocked = protocol.write_register_byte(
+                    self._ser,
+                    actuator_id,
+                    config.SERVO_ADDR_WRITE_LOCK,
+                    0,
+                )
+                time.sleep(0.01)
+                if not unlocked:
+                    results[actuator_id] = False
+                    continue
+
+                write_ok = protocol.write_register_word(
+                    self._ser,
+                    actuator_id,
+                    config.SERVO_ADDR_POSITION_CORRECTION,
+                    0,
+                )
+                time.sleep(0.01)
+
+                relock_ok = protocol.write_register_byte(
+                    self._ser,
+                    actuator_id,
+                    config.SERVO_ADDR_WRITE_LOCK,
+                    1,
+                )
+                time.sleep(0.01)
+
+                verify = protocol.read_register_word(
+                    self._ser,
+                    actuator_id,
+                    config.SERVO_ADDR_POSITION_CORRECTION,
+                )
+                if verify is not None and verify > 32767:
+                    verify -= 65536
+                results[actuator_id] = bool(write_ok and relock_ok and verify == 0)
+            except Exception as exc:
+                print(f"[Feetech] Failed to clear zero offset for servo {actuator_id}: {exc}")
+                results[actuator_id] = False
+                if unlocked:
+                    try:
+                        protocol.write_register_byte(
+                            self._ser,
+                            actuator_id,
+                            config.SERVO_ADDR_WRITE_LOCK,
+                            1,
+                        )
+                    except Exception:
+                        pass
+
+        return results
     
     # =========================================================================
     # Calibration & Configuration

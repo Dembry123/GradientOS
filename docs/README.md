@@ -156,8 +156,6 @@ Core:
 - `docs/run_controller.md`
 - `docs/command_api.md`
 - `docs/trajectory_execution.md`
-- `docs/servo_driver.md`
-- `docs/servo_protocol.md`
 - `docs/utils.md`
 - `docs/ik_solver.md`
 - `docs/trajectory_recorder.md`
@@ -369,8 +367,9 @@ flowchart TD
     C --> D[trajectory_execution planner and executor]
     D --> E[ik_solver python wrapper]
     E --> F[ikfast solver]
-    D --> G[servo_driver]
-    G --> H[servo_protocol]
+    C --> G[actuator_runtime]
+    D --> G
+    G --> H[Active ActuatorBackend]
     H --> I[Actuators]
     I --> H
     H --> G
@@ -378,7 +377,6 @@ flowchart TD
     J[utils shared state] -.-> C
     J -.-> D
     J -.-> G
-    J -.-> H
 ```
 
 ### Component Breakdown
@@ -394,8 +392,9 @@ flowchart TD
         2.  **Execution:** It starts a background thread (`_closed_loop_executor_thread`) to execute this path, using feedback from the servos to correct for errors in real time.
     *   **`ik_solver.py`:** This is a Python wrapper that provides a clean interface to the high-performance C++ IKFast solver.
     *   **`ikfast_solver` (C++):** The compiled IKFast library that can solve for the robot's joint angles for a given end-effector pose with extreme speed.
-    *   **`servo_driver.py`:** Provides a hardware abstraction layer. It takes simple commands like "set these joint angles in radians" and translates them into the raw 0-4095 values the servos understand.
-    *   **`servo_protocol.py`:** The lowest level of the software stack. It is responsible for constructing the exact byte-for-byte packets (including headers, IDs, and checksums) required by the Feetech servo communication protocol. It sends these packets over the serial port.
+    *   **`actuator_runtime.py`:** App-facing helpers that call the active `ActuatorBackend` and keep shared runtime state in `utils.py` synchronized.
+    *   **`backends/feetech/driver.py`:** The Feetech serial-servo backend. It owns serial setup, servo discovery, PID/limit writes, logical-to-physical mapping, sync reads/writes, and calibration.
+    *   **`backends/feetech/protocol.py`:** Feetech packet construction/parsing used internally by `FeetechBackend`.
     *   **`utils.py`:** A shared module containing global state (like the current trajectory status) and configuration constants (like joint limits and servo IDs) that are needed by all other modules.
 
 4.  **Servos:** The physical hardware receives the command packets and moves to the specified positions. The closed-loop control relies on the `sync_read` command to get position feedback from the servos, which flows back up the stack to the `trajectory_execution` module.

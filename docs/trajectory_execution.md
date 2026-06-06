@@ -4,7 +4,7 @@
 
 ### File Description
 
-This module is the heart of the motion control system. It embodies the "Plan then Execute" strategy. It is responsible for all the complex calculations that turn a simple command like "move here" into a smooth, precise, and error-corrected physical motion. It does not deal with any hardware-specific communication, but rather orchestrates the `ik_solver` and the `servo_driver` to achieve its goals.
+This module is the heart of the motion control system. It embodies the "Plan then Execute" strategy. It is responsible for all the complex calculations that turn a simple command like "move here" into a smooth, precise, and error-corrected physical motion. It does not own hardware-specific communication; it uses `actuator_runtime` to reach the active `ActuatorBackend` for reads and writes.
 
 ---
 
@@ -40,10 +40,10 @@ graph TD
 ```
 
 *   **Calculate Target:** Based on the loop frequency and the number of points in the plan, the executor determines which set of joint angles is the target for the current time step.
-*   **Read Actual:** It uses `servo_protocol.sync_read_positions` to get the real-world position of all servos in one efficient command.
+*   **Read Actual:** It uses `actuator_runtime.sync_read_positions`, which calls the active backend's `sync_read_positions`, to get actuator feedback in one efficient command.
 *   **Calculate Error:** It compares the target angles to the actual angles to find the tracking error for each joint.
 *   **Calculate Correction:** It uses a Proportional (P) control law. The new commanded position is the original target, nudged slightly by the error multiplied by a gain (`CORRECTION_KP_GAIN`). If the arm is lagging, the command will be slightly ahead of the path; if it's overshooting, the command will be slightly behind. This forces the arm to stay on the planned trajectory.
-*   **Actuate:** The newly calculated position commands are sent to all servos simultaneously using `servo_protocol.sync_write_goal_pos_speed_accel`.
+*   **Actuate:** The newly calculated position commands are sent simultaneously through `actuator_runtime.sync_write`, which dispatches to the active backend.
 *   **Time:** The loop sleeps for the exact amount of time needed to maintain the target frequency, ensuring the move happens at the correct speed.
 
 #### 3. Trajectory Executor (`_trajectory_executor_thread`)
@@ -52,4 +52,4 @@ This is a higher-level executor designed to run complex sequences of moves defin
 1.  Taking a list of pre-planned steps (where each step might be a joint path, a pause, etc.).
 2.  Iterating through the steps.
 3.  Calling the appropriate underlying executor for each step (e.g., the `_closed_loop_executor_thread` for a 'move' step, or `time.sleep` for a 'pause' step).
-4.  Optionally looping the entire sequence. 
+4.  Optionally looping the entire sequence.

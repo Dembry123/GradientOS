@@ -2,7 +2,6 @@ import unittest
 import sys
 import os
 
-from gradient_os.arm_controller import servo_protocol
 from gradient_os.arm_controller import utils
 from gradient_os.arm_controller.backends.feetech import config as feetech_config
 from gradient_os.arm_controller.backends.feetech import protocol as feetech_protocol
@@ -50,7 +49,7 @@ class TestServoProtocol(unittest.TestCase):
         packet_data = bytearray([0x01, 0x04, 0x03, 0x04, 0x1A])
         # Expected checksum from documentation is 0xD9
         expected_checksum = 0xD9
-        calculated_checksum = servo_protocol.calculate_checksum(packet_data)
+        calculated_checksum = feetech_protocol.calculate_checksum(packet_data)
         self.assertEqual(calculated_checksum, expected_checksum)
 
     def test_sync_write_packet_structure(self) -> None:
@@ -96,18 +95,18 @@ class TestServoProtocol(unittest.TestCase):
             20, 2, 0xD0, 0x07, 0x00, 0x00, 0xC8, 0x00, # Servo 20 data
         ])
         
-        expected_checksum = servo_protocol.calculate_checksum(checksum_data)
+        expected_checksum = feetech_protocol.calculate_checksum(checksum_data)
         
         expected_packet = bytearray([0xFF, 0xFF]) + checksum_data + bytearray([expected_checksum])
 
         # To test, we need to mock the ser.write call
-        with unittest.mock.patch('gradient_os.arm_controller.utils.ser') as mock_serial:
-            servo_protocol.sync_write_goal_pos_speed_accel(servo_data)
-            # Check that write was called
-            mock_serial.write.assert_called_once()
-            # Get the actual packet that was written
-            actual_packet = mock_serial.write.call_args[0][0]
-            self.assertEqual(actual_packet, expected_packet)
+        mock_serial = unittest.mock.Mock()
+        feetech_protocol.sync_write_goal_pos_speed_accel(mock_serial, servo_data)
+        # Check that write was called
+        mock_serial.write.assert_called_once()
+        # Get the actual packet that was written
+        actual_packet = mock_serial.write.call_args[0][0]
+        self.assertEqual(actual_packet, expected_packet)
 
     def test_feetech_sync_read_keeps_position_with_status_error(self) -> None:
         """

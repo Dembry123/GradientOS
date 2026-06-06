@@ -26,9 +26,8 @@ try:
     from .arm_controller.backends import registry as backend_registry
     
     from .arm_controller import (
+        actuator_runtime as actuators,
         command_api,
-        servo_driver,
-        servo_protocol,
         utils,
         robot_config,
     )
@@ -208,23 +207,17 @@ Examples:
             # backend is selected. Keep the controller alive but treat motion as unavailable.
             print("[Controller] EtherCAT RTCore backend selected; skipping legacy serial init (motion unavailable).")
         else:
-            print("[Controller] Falling back to legacy initialization...")
-            # For backward compatibility during migration, if backend creation fails,
-            # we continue with legacy initialization
+            print("[Controller] Backend initialization failed; motion is unavailable until the backend is healthy.")
 
     # ==========================================================================
-    # Legacy Initialization (to be migrated in Phase 2)
+    # Backend Runtime Initialization
     # ==========================================================================
-    # For now, we still use servo_driver which uses servo_protocol directly.
-    # Once Phase 2 is complete, this will be replaced with:
-    #   active_backend.initialize()
-    #   active_backend.apply_joint_limits()
     if servo_backend == "ethercat_rtcore":
         print("[Controller] EtherCAT RTCore backend active; skipping legacy serial servo initialization.")
-        # Best-effort state sync (no serial). If RTCore is connected, servo_driver will read via backend.
         if backend_ready and active_backend is not None and active_backend.is_initialized:
             try:
-                utils.current_logical_joint_angles_rad = servo_driver.get_current_arm_state_rad(verbose=False)
+                actuators.sync_global_state_from_backend(active_backend)
+                utils.current_logical_joint_angles_rad = actuators.get_joint_positions(verbose=False)
             except Exception:
                 utils.current_logical_joint_angles_rad = [0.0] * selected_robot.num_logical_joints
         else:
@@ -233,32 +226,30 @@ Examples:
         utils.gripper_present = False
         utils.current_gripper_angle_rad = 0.0
     else:
-        if args.sim:
-            from .arm_controller import sim_backend
-            sim_backend.activate()
+        if backend_ready and active_backend is not None and active_backend.is_initialized:
+            actuators.sync_global_state_from_backend(active_backend)
 
-        # Initialize the hardware using legacy servo_driver
-        servo_driver.initialize_servos()
-        # Angle limit writes are serial-servo specific (EEPROM registers). Skip for non-serial backends.
-        if servo_backend == "feetech":
-            servo_driver.set_servo_angle_limits_from_urdf()
+            offsets = actuators.read_hardware_zero_offsets(sorted(actuators.get_present_actuator_ids()))
+            if offsets:
+                print("[Controller] Stored hardware zero offsets:")
+                for actuator_id, offset in offsets.items():
+                    print(f"[Controller]   - Actuator {actuator_id}: Offset = {offset}")
+
+            if servo_backend in {"feetech", "simulation"}:
+                if not actuators.apply_joint_limits():
+                    print(f"[Controller] WARNING: Failed to apply joint limits for backend: {servo_backend}")
+            else:
+                print(f"[Controller] Skipping URDF angle limit writes for backend: {servo_backend}")
+
+            # Homing Routine: Read positions to synchronize internal state.
+            utils.current_logical_joint_angles_rad = actuators.get_joint_positions(verbose=True)
+            gripper_pos = actuators.get_gripper_position()
+            if gripper_pos is not None:
+                print(f"[Controller] Initial gripper angle: {np.rad2deg(gripper_pos):.1f} degrees")
         else:
-            print(f"[Controller] Skipping URDF angle limit writes for backend: {servo_backend}")
-
-        # Homing Routine: Read servo positions to synchronize our internal state.
-        # This prevents dangerous movements if the arm isn't at zero when the script starts.
-        utils.current_logical_joint_angles_rad = servo_driver.get_current_arm_state_rad()
-        # If gripper is present, also get its initial state
-        if utils.gripper_present:
-            # Read gripper position via servo_driver (uses backend if available)
-            raw_pos = servo_driver.read_single_servo_position(utils.SERVO_ID_GRIPPER)
-            if raw_pos is not None:
-                try:
-                    gripper_config_index = utils.SERVO_IDS.index(utils.SERVO_ID_GRIPPER)
-                    utils.current_gripper_angle_rad = servo_driver.raw_to_angle_rad(raw_pos, gripper_config_index)
-                    print(f"[Controller] Initial gripper angle: {np.rad2deg(utils.current_gripper_angle_rad):.1f} degrees")
-                except (ValueError, IndexError):
-                    print("[Controller] WARNING: Could not determine initial gripper angle.")
+            utils.current_logical_joint_angles_rad = [0.0] * selected_robot.num_logical_joints
+            utils.gripper_present = False
+            utils.current_gripper_angle_rad = 0.0
 
     # --- UDP Server Setup ---
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -291,12 +282,14 @@ Examples:
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             last_extra_ts = 0.0  # throttle extended servo telemetry to ~2 Hz
             
-            # Get telemetry block configuration from the active backend
-            telemetry_blocks = backend_registry.get_telemetry_blocks()
+            try:
+                telemetry_blocks = backend_registry.get_telemetry_blocks()
+            except Exception:
+                telemetry_blocks = []
             
             while not telemetry_stop_event.is_set():
                 try:
-                    q = servo_driver.get_current_arm_state_rad(verbose=False)
+                    q = actuators.get_joint_positions(verbose=False)
                     g = utils.current_gripper_angle_rad if utils.gripper_present else None
                     msg: dict[str, object] = {"t": time.time(), "joints": [float(x) for x in q]}
                     if g is not None:
@@ -314,26 +307,19 @@ Examples:
                     if now - last_extra_ts >= 0.5:
                         last_extra_ts = now
                         try:
-                            # Get present servo IDs from backend or use configured IDs
-                            backend = backend_registry.get_active_backend()
-                            if backend and hasattr(backend, 'present_servo_ids'):
-                                present_ids = list(backend.present_servo_ids)
-                            else:
-                                present_ids = list(utils.SERVO_IDS)
+                            present_ids = sorted(actuators.get_present_actuator_ids())
                             
-                            if present_ids:
+                            if present_ids and telemetry_blocks:
                                 # Read telemetry blocks using backend-defined addresses
                                 block_data = []
                                 for addr, length in telemetry_blocks:
-                                    if backend and hasattr(backend, 'sync_read_block'):
-                                        block_data.append(backend.sync_read_block(
-                                            present_ids, start_address=addr, data_len=length
-                                        ))
-                                    else:
-                                        block_data.append(servo_protocol.sync_read_block(
-                                            present_ids, start_address=addr, data_len=length,
-                                            timeout_s=0.05, diagnostics=False
-                                        ))
+                                    block_data.append(actuators.sync_read_block(
+                                        present_ids,
+                                        start_address=addr,
+                                        data_len=length,
+                                        timeout_s=0.05,
+                                        diagnostics=False,
+                                    ))
                                 
                                 servos: dict[str, dict[str, object]] = {}
                                 for sid in present_ids:
@@ -405,7 +391,7 @@ Examples:
                         calibrating_servo_id = None
                         calibration_client_addr = None
                     else: # Continue streaming calibration data
-                        raw_pos = servo_driver.read_single_servo_position(calibrating_servo_id)
+                        raw_pos = actuators.read_single_actuator_position(calibrating_servo_id)
                         if raw_pos is not None:
                             reply = f"CALIB_DATA,{calibrating_servo_id},{raw_pos}"
                             sock.sendto(reply.encode("utf-8"), calibration_client_addr)
@@ -441,7 +427,10 @@ Examples:
                         print(f"[Controller] SET_ZERO (Joint {joint_num}) will calibrate servos: {servos_to_zero}")
 
                         for sid in servos_to_zero:
-                            servo_driver.set_current_position_as_hardware_zero(sid)
+                            if actuators.set_current_position_as_zero(sid):
+                                print(f"[Controller] Actuator {sid} has set its current position as zero.")
+                            else:
+                                print(f"[Controller] Failed to set zero for actuator {sid}.")
 
                     except (ValueError, IndexError):
                         print("[Controller] Error: Invalid SET_ZERO command. Use 'SET_ZERO,JointNum'.")
@@ -452,13 +441,7 @@ Examples:
                         print(f"[Controller] WARNING: Received FACTORY_RESET for Servo ID: {servo_id_to_reset}.")
                         print("[Controller] This will reset all EEPROM values (PID, offsets, limits) to factory defaults, except for the ID.")
 
-                        # Use backend if available, otherwise fall back to servo_protocol
-                        backend = backend_registry.get_active_backend()
-                        reset_success = False
-                        if backend and hasattr(backend, 'factory_reset_actuator'):
-                            reset_success = backend.factory_reset_actuator(servo_id_to_reset)
-                        else:
-                            reset_success = servo_protocol.factory_reset_servo(servo_id_to_reset)
+                        reset_success = actuators.factory_reset_actuator(servo_id_to_reset)
                         
                         if reset_success:
                             print(f"[Controller] Factory reset command sent to servo {servo_id_to_reset}.")
@@ -467,17 +450,16 @@ Examples:
                             time.sleep(1.0)
 
                             print(f"[Controller] Now sending RESTART command to servo ID {servo_id_to_reset}.")
-                            restart_success = False
-                            if backend and hasattr(backend, 'restart_actuator'):
-                                restart_success = backend.restart_actuator(servo_id_to_reset)
-                            else:
-                                restart_success = servo_protocol.restart_servo(servo_id_to_reset)
+                            restart_success = actuators.restart_actuator(servo_id_to_reset)
                             
                             if restart_success:
                                 print(f"[Controller] Servo {servo_id_to_reset} has been reset and restarted.")
                                 # CRITICAL: Re-initialize the servo with our application's settings
                                 time.sleep(1.0) # Wait for servo to be fully online after restart
-                                servo_driver.reinitialize_servo(servo_id_to_reset)
+                                if not actuators.set_pid_gains(servo_id_to_reset, utils.DEFAULT_KP, utils.DEFAULT_KI, utils.DEFAULT_KD):
+                                    print(f"[Controller] WARNING: Failed to set PID gains for servo {servo_id_to_reset}.")
+                                if not actuators.apply_joint_limits():
+                                    print("[Controller] WARNING: Failed to re-apply joint limits after reset.")
                             else:
                                 print(f"[Controller] Failed to send restart command. Please power cycle the servo manually.")
                         else:
@@ -487,17 +469,14 @@ Examples:
 
                 elif command == "GET_ALL_POSITIONS":
                     # Use a single SYNC READ command for faster bulk feedback
-                    backend = backend_registry.get_active_backend()
-                    if backend and hasattr(backend, 'sync_read_positions'):
-                        positions_dict = backend.sync_read_positions()
-                    else:
-                        positions_dict = servo_protocol.sync_read_positions(utils.SERVO_IDS)
+                    positions_dict = actuators.sync_read_positions(actuator_ids=list(utils.SERVO_IDS))
 
-                    # If the sync read failed, fall back to the slower per-servo read to maintain functionality
-                    if positions_dict is None:
+                    # Fill missing IDs with slower per-actuator reads to preserve the all-positions response.
+                    if not positions_dict:
                         positions_dict = {}
-                        for s_id in utils.SERVO_IDS:
-                            raw_pos = servo_driver.read_single_servo_position(s_id)
+                    for s_id in utils.SERVO_IDS:
+                        if s_id not in positions_dict:
+                            raw_pos = actuators.read_single_actuator_position(s_id)
                             positions_dict[s_id] = raw_pos
                             time.sleep(0.01)  # brief spacing to avoid overwhelming the bus
 
@@ -605,7 +584,8 @@ Examples:
                     sock.sendto(reply.encode("utf-8"), addr)
 
                 elif command == "REFRESH_LIMITS":
-                    servo_driver.set_servo_angle_limits_from_urdf()
+                    if not actuators.apply_joint_limits():
+                        print("[Controller] WARNING: Failed to refresh actuator limits.")
 
                 elif command == "WAIT_FOR_IDLE":
                     command_api.handle_wait_for_idle()
@@ -1000,7 +980,7 @@ Examples:
                             accel_index = speed_index + 1
                             accel = float(parts[accel_index]) if len(parts) > accel_index else utils.DEFAULT_SERVO_ACCELERATION_DEG_S2
 
-                            servo_driver.set_servo_positions(arm_angles, speed, accel)
+                            actuators.set_joint_positions(arm_angles, speed, accel)
                             if gripper_rad is not None:
                                 command_api.handle_set_gripper_state(np.rad2deg(gripper_rad), speed, accel)
                     except ValueError:
@@ -1009,7 +989,7 @@ Examples:
             except socket.timeout:
                 if in_calibration_mode and calibrating_servo_id is not None:
                     # Keep streaming calibration data if no new command arrives
-                    raw_pos = servo_driver.read_single_servo_position(calibrating_servo_id)
+                    raw_pos = actuators.read_single_actuator_position(calibrating_servo_id)
                     if raw_pos is not None:
                         reply = f"CALIB_DATA,{calibrating_servo_id},{raw_pos}"
                         sock.sendto(reply.encode("utf-8"), calibration_client_addr)
