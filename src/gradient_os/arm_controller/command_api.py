@@ -1420,10 +1420,9 @@ def _jog_controller_thread():
             continue
 
         mode = _active_jog_mode()
-        if mode == "absolute_pose":
-            measured_q = actuators.get_joint_positions(verbose=False)
-            if measured_q is not None:
-                q_current = measured_q
+        measured_q = actuators.get_joint_positions(verbose=False)
+        if measured_q is not None:
+            q_current = measured_q
 
         # --- Safety Timeout ---
         # Velocity mode times out on velocity commands. Absolute mode times out
@@ -1686,9 +1685,7 @@ def _jog_controller_thread():
                     solve_time_ms=solve_time_ms,
                     teleop_mode=mode,
                 )
-                if mode == "velocity_jog":
-                    q_current = q_clamped # Update our state for the next iteration's IK
-                elif actual_angles is not None:
+                if actual_angles is not None:
                     q_current = actual_angles
                 pose_error = target_position - current_position
                 orientation_error_deg = np.rad2deg(
