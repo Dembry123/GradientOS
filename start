@@ -11,6 +11,7 @@ WEB_DIR="${REPO_ROOT}/web-ui"
 
 SIM_MODE=true
 SOLVER="ikfast"
+TELEOP_MODE="velocity_jog"
 JOG_FREQUENCY="25"
 JOINT_SPEED_LIMIT="800"
 
@@ -28,7 +29,10 @@ Options:
   --sim=true|false              Use simulator or real servos (default: true)
   --sim                         Shortcut for --sim=true
   --real                        Shortcut for --sim=false
-  --solver=ikfast|quik|numeric  IK backend (quik maps to numeric)
+  --solver=ikfast|quik|trac|dls|qp
+                                IK backend (default: ikfast)
+  --teleop-mode=velocity_jog|absolute_pose
+                                Realtime jog control mode (default: velocity_jog)
   --jog-frequency=N             Jog loop frequency in Hz (default: 25)
   --joint-speed-limit=N         Raw Feetech jog speed register, 1..800 (default: 800)
   -h, --help                    Show this help
@@ -36,7 +40,7 @@ Options:
 Examples:
   ./start
   ./start --sim=false --solver=ikfast --joint-speed-limit=400 --jog-frequency=50
-  ./start --real --solver=quik --joint-speed-limit=300
+  ./start --real --solver=quik --teleop-mode=absolute_pose --joint-speed-limit=300
 USAGE
 }
 
@@ -78,6 +82,9 @@ for arg in "$@"; do
     --solver=*)
       SOLVER="${arg#*=}"
       ;;
+    --teleop-mode=*)
+      TELEOP_MODE="${arg#*=}"
+      ;;
     --jog-frequency=*)
       JOG_FREQUENCY="${arg#*=}"
       ;;
@@ -100,21 +107,35 @@ if [[ "${JOINT_SPEED_LIMIT}" -gt 800 ]]; then
   exit 2
 fi
 
+case "${TELEOP_MODE}" in
+  velocity_jog|absolute_pose)
+    ;;
+  *)
+    echo "[gradient-robotics] ERROR: Unknown teleop mode '${TELEOP_MODE}'." >&2
+    echo "[gradient-robotics] Available modes: velocity_jog, absolute_pose." >&2
+    exit 2
+    ;;
+esac
+
 case "${SOLVER}" in
   ikfast)
     MINI_ARM_SOLVER_VALUE="ikfast"
     ;;
   quik|numeric)
-    MINI_ARM_SOLVER_VALUE="numeric"
+    MINI_ARM_SOLVER_VALUE="quik"
     ;;
-  qp|qpdiff|differential-qp|trac)
-    echo "[gradient-robotics] ERROR: Solver '${SOLVER}' is not integrated yet." >&2
-    echo "[gradient-robotics] Available today: ikfast, quik (numeric)." >&2
-    exit 2
+  trac)
+    MINI_ARM_SOLVER_VALUE="trac"
+    ;;
+  dls)
+    MINI_ARM_SOLVER_VALUE="dls"
+    ;;
+  qp|qpdiff|differential-qp)
+    MINI_ARM_SOLVER_VALUE="qp"
     ;;
   *)
     echo "[gradient-robotics] ERROR: Unknown solver '${SOLVER}'." >&2
-    echo "[gradient-robotics] Available today: ikfast, quik (numeric)." >&2
+    echo "[gradient-robotics] Available solvers: ikfast, quik, trac, dls, qp." >&2
     exit 2
     ;;
 esac
@@ -141,6 +162,7 @@ fi
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export MINI_ARM_SOLVER="${MINI_ARM_SOLVER_VALUE}"
+export GRADIENT_TELEOP_MODE="${TELEOP_MODE}"
 export GRADIENT_JOG_FREQUENCY_HZ="${JOG_FREQUENCY}"
 export GRADIENT_JOG_SERVO_SPEED_REGISTER="${JOINT_SPEED_LIMIT}"
 
@@ -189,6 +211,7 @@ fi
 echo "[gradient-robotics] Stack config:"
 echo "  sim=${SIM_MODE}"
 echo "  solver=${SOLVER} (MINI_ARM_SOLVER=${MINI_ARM_SOLVER})"
+echo "  teleop_mode=${GRADIENT_TELEOP_MODE}"
 echo "  jog_frequency=${GRADIENT_JOG_FREQUENCY_HZ} Hz"
 echo "  joint_speed_limit=${GRADIENT_JOG_SERVO_SPEED_REGISTER} raw register"
 echo "  vision=false"

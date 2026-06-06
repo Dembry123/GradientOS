@@ -254,10 +254,10 @@ class HebiMobileIOBridge:
                 self.last_robot_pose_log = now
             return False
 
-        print("[teleop] enable: latching phone pose, robot pose, and starting jog")
+        print(f"[teleop] enable: latching phone pose, robot pose, and starting {self.config.teleop_mode}")
         self.mapper.reset(pose, reference_robot_pose=robot_pose)
         self.phone_pose_reference = pose
-        self.client.start()
+        self.client.start(self.config.teleop_mode)
         self.client.zero()
         self.client.set_deadman(True)
         self.enabled = True
@@ -339,12 +339,17 @@ class HebiMobileIOBridge:
                         target = self.mapper.target_delta(self.last_pose)
                         target_pose = self.mapper.target_tool_pose_from_delta(target)
                         visual_pose = self.mapper.visual_tool_pose_from_phone(self.last_pose)
-                        command = self.mapper.command_for_pose(
-                            self.last_pose,
-                            dt_s=dt,
-                            gripper_axis_value=axis_value,
-                            robot_pose=robot_pose,
-                        )
+                        if self.config.teleop_mode == "absolute_pose":
+                            command = JogCommand(
+                                gripper_deg_s=self.mapper.gripper_rate_for_axis(axis_value)
+                            )
+                        else:
+                            command = self.mapper.command_for_pose(
+                                self.last_pose,
+                                dt_s=dt,
+                                gripper_axis_value=axis_value,
+                                robot_pose=robot_pose,
+                            )
                         self._publish_phone_pose(
                             self.last_pose,
                             now=loop_start,
@@ -355,15 +360,28 @@ class HebiMobileIOBridge:
                             command=command,
                         )
                         self.client.set_deadman(True)
-                        self.client.send_velocity(command)
+                        if self.config.teleop_mode == "absolute_pose":
+                            if target_pose is not None:
+                                self.client.send_target_pose(target_pose)
+                        else:
+                            self.client.send_velocity(command)
                         self.client.send_gripper_velocity(command)
                         if loop_start - last_log >= self.config.log_interval_s:
-                            print(
-                                "[teleop] cmd "
-                                f"lin={np.round(command.linear_m_s, 4)} m/s "
-                                f"ang={np.round(command.angular_deg_s, 1)} deg/s "
-                                f"grip={command.gripper_deg_s:.1f} deg/s"
-                            )
+                            if self.config.teleop_mode == "absolute_pose" and target_pose is not None:
+                                eul = target_pose.orientation.as_euler("xyz", degrees=True)
+                                print(
+                                    "[teleop] target "
+                                    f"pos={np.round(target_pose.position_m, 4)} m "
+                                    f"eul={np.round(eul, 1)} deg "
+                                    f"grip={command.gripper_deg_s:.1f} deg/s"
+                                )
+                            else:
+                                print(
+                                    "[teleop] cmd "
+                                    f"lin={np.round(command.linear_m_s, 4)} m/s "
+                                    f"ang={np.round(command.angular_deg_s, 1)} deg/s "
+                                    f"grip={command.gripper_deg_s:.1f} deg/s"
+                                )
                             last_log = loop_start
                 elif self.enabled:
                     self._release()

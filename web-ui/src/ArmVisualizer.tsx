@@ -527,8 +527,6 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
   const sceneRef = useRef<THREE.Scene | null>(null);
   const robotRef = useRef<URDFRobot | null>(null);
   const targetAnglesRef = useRef<number[] | null>(null);
-  const currentAnglesRef = useRef<number[] | null>(null);
-  const previousTimeRef = useRef<number | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const phonePoseRef = useRef<PhonePoseTelemetry | null>(null);
@@ -990,7 +988,6 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
       if (options?.applySnapshot) {
         const values = targetAnglesRef.current;
         if (values) {
-          currentAnglesRef.current = values.slice();
           values.forEach((value, index) => {
             const joint = robot.joints[`joint${index + 1}`];
             if (joint) {
@@ -1070,9 +1067,6 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
         scene.add(robot);
 
         robotRef.current = robot;
-        if (!currentAnglesRef.current) {
-          currentAnglesRef.current = new Array(6).fill(0);
-        }
         if (!targetAnglesRef.current) {
           targetAnglesRef.current = new Array(6).fill(0);
         }
@@ -1106,52 +1100,8 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
     };
 
     let animationFrameId: number;
-    const animate = (time?: number) => {
+    const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
-
-      const deltaSeconds =
-        previousTimeRef.current !== null && time !== undefined
-          ? Math.min((time - previousTimeRef.current) / 1000, 0.05)
-          : 0.016;
-      previousTimeRef.current = time ?? null;
-
-      const targetAngles = targetAnglesRef.current;
-      const robot = robotRef.current;
-      let jointsChanged = false;
-      if (robot && targetAngles && targetAngles.length > 0 && isGroundedRef.current) {
-        if (!currentAnglesRef.current) {
-          currentAnglesRef.current = targetAngles.slice();
-        }
-        const currentAngles = currentAnglesRef.current!;
-        const jointsMap = robot.joints;
-        const smoothing = 12; // rad/s tracking speed
-
-        for (let index = 0; index < targetAngles.length; index += 1) {
-          const jointName = `joint${index + 1}`;
-          const joint = jointsMap[jointName];
-          if (!joint) {
-            continue;
-          }
-          const currentValue =
-            typeof currentAngles[index] === "number" ? currentAngles[index] : 0;
-          const targetValue = targetAngles[index];
-          if (!Number.isFinite(targetValue)) {
-            continue;
-          }
-          const blend = Math.min(1, deltaSeconds * smoothing);
-          const blendFactor = Number.isFinite(blend) ? blend : 1;
-          const nextValue = currentValue + (targetValue - currentValue) * blendFactor;
-          if (Math.abs(nextValue - currentValue) > 1e-5) {
-            jointsChanged = true;
-          }
-          joint.setJointValue(nextValue);
-          currentAngles[index] = nextValue;
-        }
-      }
-
-      if (jointsChanged) {
-        scheduleBoundingRefresh();
-      }
 
       if (pendingDynamicBoundsRef.current) {
         pendingDynamicBoundsRef.current = false;
@@ -1356,8 +1306,6 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
       sceneRef.current = null;
       robotRef.current = null;
       targetAnglesRef.current = null;
-      currentAnglesRef.current = null;
-      previousTimeRef.current = null;
       cameraRef.current = null;
       isGroundedRef.current = false;
       pendingDynamicBoundsRef.current = false;
@@ -1930,9 +1878,6 @@ export const ArmVisualizer = forwardRef(function ArmVisualizer(
       return;
     }
     targetAnglesRef.current = joints.slice();
-    if (!currentAnglesRef.current) {
-      currentAnglesRef.current = joints.slice();
-    }
     if (!isGroundedRef.current) {
       return;
     }

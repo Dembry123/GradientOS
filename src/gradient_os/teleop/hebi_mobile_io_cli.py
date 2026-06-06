@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .hebi_mobile_io_calibration import run_phone_frame_calibration
@@ -18,6 +19,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--family", default="HEBI")
     parser.add_argument("--name", default="mobileIO")
     parser.add_argument("--rate-hz", type=float, default=25.0)
+    parser.add_argument(
+        "--teleop-mode",
+        choices=("velocity_jog", "absolute_pose"),
+        default=os.getenv("GRADIENT_TELEOP_MODE", "velocity_jog"),
+    )
     parser.add_argument("--lookup-wait-s", type=float, default=1.0)
     parser.add_argument("--stale-timeout-s", type=float, default=0.35)
     parser.add_argument("--request-timeout-s", type=float, default=0.45)
@@ -96,6 +102,7 @@ def config_from_args(args: argparse.Namespace) -> BridgeConfig:
         family=args.family,
         name=args.name,
         rate_hz=args.rate_hz,
+        teleop_mode=args.teleop_mode,
         lookup_wait_s=args.lookup_wait_s,
         stale_timeout_s=args.stale_timeout_s,
         request_timeout_s=args.request_timeout_s,

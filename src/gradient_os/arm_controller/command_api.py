@@ -821,6 +821,8 @@ def _force_stop_jog_controller(join_timeout_s: float = 0.5):
     utils.trajectory_state["jog_deadman"] = False
     utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
     utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    utils.trajectory_state["jog_target_position_m"] = None
+    utils.trajectory_state["jog_target_orientation_matrix"] = None
     _update_jog_ik_status("stopped", "jog force-stopped")
 
     thread = utils.trajectory_state.get("jog_thread")
@@ -1175,6 +1177,25 @@ JOG_LINEAR_HOLD_EPS_M_S = 1e-5
 JOG_ANGULAR_HOLD_EPS_DEG_S = 0.02
 JOG_MAX_JOINT_STEP_RAD = 0.35
 JOG_DIAG_SERVO_SAMPLE_INTERVAL = 5
+VALID_JOG_MODES = {"velocity_jog", "absolute_pose"}
+DEFAULT_JOG_MODE = os.getenv("GRADIENT_TELEOP_MODE", "velocity_jog").strip().lower()
+if DEFAULT_JOG_MODE not in VALID_JOG_MODES:
+    print(f"[Jog] WARNING: Invalid GRADIENT_TELEOP_MODE={DEFAULT_JOG_MODE!r}; using velocity_jog.")
+    DEFAULT_JOG_MODE = "velocity_jog"
+
+
+def _normalize_jog_mode(mode: str | None) -> str:
+    value = (mode or DEFAULT_JOG_MODE).strip().lower()
+    if value not in VALID_JOG_MODES:
+        raise ValueError(f"Unsupported jog mode {mode!r}; expected velocity_jog or absolute_pose.")
+    return value
+
+
+def _active_jog_mode() -> str:
+    try:
+        return _normalize_jog_mode(utils.trajectory_state.get("jog_mode"))
+    except Exception:
+        return "velocity_jog"
 
 
 def _jog_json_safe(value):
@@ -1282,7 +1303,7 @@ def _update_jog_ik_status(status: str, reason: str = "", **fields):
     if status == "ok":
         success_count += 1
         consecutive_failures = 0
-    elif status in {"ik_failed", "fk_failed", "apply_failed", "joint_jump_rejected"}:
+    elif status in {"ik_failed", "fk_failed", "apply_failed", "joint_jump_rejected", "timeout_zeroed", "stale_target"}:
         failure_count += 1
         consecutive_failures += 1
     elif status in {"starting", "stopped"}:
@@ -1297,7 +1318,13 @@ def _update_jog_ik_status(status: str, reason: str = "", **fields):
         "consecutive_failures": consecutive_failures,
         "is_jogging": bool(utils.trajectory_state.get("is_jogging", False)),
         "deadman": bool(utils.trajectory_state.get("jog_deadman", False)),
+        "teleop_mode": _active_jog_mode(),
     }
+    if ik_solver is not None and hasattr(ik_solver, "get_backend_name"):
+        try:
+            payload["solver"] = ik_solver.get_backend_name()
+        except Exception:
+            pass
     for key, value in fields.items():
         if value is None:
             continue
@@ -1392,10 +1419,19 @@ def _jog_controller_thread():
             was_paused_for_motion = False
             continue
 
+        mode = _active_jog_mode()
+        if mode == "absolute_pose":
+            measured_q = actuators.get_joint_positions(verbose=False)
+            if measured_q is not None:
+                q_current = measured_q
+
         # --- Safety Timeout ---
-        # If we haven't received a velocity command recently, set velocities to zero.
-        time_since_last_cmd = time.monotonic() - utils.trajectory_state["last_jog_command_time"]
-        if time_since_last_cmd > JOG_VELOCITY_TIMEOUT_S:
+        # Velocity mode times out on velocity commands. Absolute mode times out
+        # on target poses so repeated deadman pings cannot keep an old pose alive.
+        now_mono = time.monotonic()
+        time_since_last_cmd = now_mono - float(utils.trajectory_state.get("last_jog_command_time", 0.0))
+        time_since_last_target = now_mono - float(utils.trajectory_state.get("last_jog_target_time", 0.0))
+        if mode == "velocity_jog" and time_since_last_cmd > JOG_VELOCITY_TIMEOUT_S:
             utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
             utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
             if not timeout_zero_logged:
@@ -1405,6 +1441,16 @@ def _jog_controller_thread():
                 "timeout_zeroed",
                 "no recent jog velocity command",
                 command_age_s=time_since_last_cmd,
+            )
+        elif mode == "absolute_pose" and time_since_last_target > JOG_VELOCITY_TIMEOUT_S:
+            utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+            if not timeout_zero_logged:
+                print(f"[Jog] Target pose stale for {time_since_last_target:.3f}s; holding absolute pose mode.")
+                timeout_zero_logged = True
+            _update_jog_ik_status(
+                "stale_target",
+                "no recent absolute target pose",
+                target_age_s=time_since_last_target,
             )
         else:
             timeout_zero_logged = False
@@ -1425,33 +1471,68 @@ def _jog_controller_thread():
             except Exception:
                 pass
         
-        # 2. Get target velocities from global state (respect deadman gate)
-        velocities = utils.trajectory_state["jog_velocities"]
+        # 2. Resolve the target pose for the selected control mode.
+        velocities = np.zeros(6, dtype=float)
         deadman_held = bool(utils.trajectory_state.get("jog_deadman", False))
-        if not deadman_held:
-            # If deadman not held, force zero velocities (gripper included)
-            if utils.trajectory_state.get("jog_debug", False):
-                print("[Jog] Deadman not held → zeroing velocities.")
-            velocities = np.zeros(6, dtype=float)
-            utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
-        # Apply backend safety caps component-wise
-        linear_vel = np.clip(velocities[:3], -MAX_JOG_LINEAR_M_S, MAX_JOG_LINEAR_M_S)
-        angular_deg_s = np.clip(velocities[3:], -MAX_JOG_ANGULAR_DEG_S, MAX_JOG_ANGULAR_DEG_S)
-        angular_vel_rad_s = np.deg2rad(angular_deg_s) # Convert RPY rates to radians
+        target_position = None
+        target_orientation = None
+        target_age_s = None
+
+        if mode == "velocity_jog":
+            velocities = utils.trajectory_state["jog_velocities"]
+            if not deadman_held:
+                # If deadman not held, force zero velocities (gripper included)
+                if utils.trajectory_state.get("jog_debug", False):
+                    print("[Jog] Deadman not held -> zeroing velocities.")
+                velocities = np.zeros(6, dtype=float)
+                utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+            linear_vel = np.clip(velocities[:3], -MAX_JOG_LINEAR_M_S, MAX_JOG_LINEAR_M_S)
+            angular_deg_s = np.clip(velocities[3:], -MAX_JOG_ANGULAR_DEG_S, MAX_JOG_ANGULAR_DEG_S)
+            angular_vel_rad_s = np.deg2rad(angular_deg_s)
+            has_arm_motion_command = (
+                float(np.linalg.norm(linear_vel)) > JOG_LINEAR_HOLD_EPS_M_S
+                or float(np.linalg.norm(angular_deg_s)) > JOG_ANGULAR_HOLD_EPS_DEG_S
+            )
+        else:
+            target_position_state = utils.trajectory_state.get("jog_target_position_m")
+            target_orientation_state = utils.trajectory_state.get("jog_target_orientation_matrix")
+            target_age_s = time_since_last_target
+            if (
+                target_position_state is not None
+                and target_orientation_state is not None
+                and target_age_s <= JOG_VELOCITY_TIMEOUT_S
+            ):
+                target_position = np.asarray(target_position_state, dtype=float).reshape(3)
+                target_orientation = np.asarray(target_orientation_state, dtype=float).reshape(3, 3)
+            linear_vel = np.zeros(3, dtype=float)
+            angular_deg_s = np.zeros(3, dtype=float)
+            if target_position is not None and target_orientation is not None and dt > 1e-6:
+                linear_vel = np.clip(
+                    (target_position - current_position) / dt,
+                    -MAX_JOG_LINEAR_M_S,
+                    MAX_JOG_LINEAR_M_S,
+                )
+                rot_error = R.from_matrix(target_orientation @ current_orientation.T).as_rotvec()
+                angular_deg_s = np.clip(
+                    np.rad2deg(rot_error) / dt,
+                    -MAX_JOG_ANGULAR_DEG_S,
+                    MAX_JOG_ANGULAR_DEG_S,
+                )
+            angular_vel_rad_s = np.deg2rad(angular_deg_s)
+            has_arm_motion_command = target_position is not None and target_orientation is not None
 
         gripper_rate_deg_s = float(utils.trajectory_state.get("jog_gripper_velocity_deg_s", 0.0))
-        has_arm_motion_command = (
-            float(np.linalg.norm(linear_vel)) > JOG_LINEAR_HOLD_EPS_M_S
-            or float(np.linalg.norm(angular_deg_s)) > JOG_ANGULAR_HOLD_EPS_DEG_S
-        )
         has_gripper_motion_command = abs(gripper_rate_deg_s) > 1e-3
         if not deadman_held or (not has_arm_motion_command and not has_gripper_motion_command):
             _update_jog_ik_status(
                 "deadman_released" if not deadman_held else "holding",
-                "deadman released" if not deadman_held else "zero velocity command",
+                "deadman released" if not deadman_held else (
+                    "waiting for absolute target pose" if mode == "absolute_pose" else "zero velocity command"
+                ),
                 command_linear_m_s=linear_vel,
                 command_angular_deg_s=angular_deg_s,
                 command_age_s=time_since_last_cmd,
+                target_age_s=target_age_s,
             )
             loop_duration = time.monotonic() - loop_start_time
             sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
@@ -1476,30 +1557,29 @@ def _jog_controller_thread():
                 time.sleep(sleep_time)
             continue
         
-        # 3. Calculate target pose for this time step
-        # Integrate linear velocity to get new position
-        target_position = current_position + linear_vel * dt
-        
-        # Integrate angular velocity to get new orientation
-        # Create a small rotation vector from angular velocity and time step
-        rotation_vector = angular_vel_rad_s * dt
-        # Convert the small rotation vector to a rotation matrix
-        delta_rotation = R.from_rotvec(rotation_vector).as_matrix()
-        # Apply the small rotation to the current orientation
-        target_orientation = delta_rotation @ current_orientation
+        # 3. Calculate target pose for this time step.
+        # velocity_jog integrates the requested Cartesian velocity; absolute_pose
+        # already has a direct target pose from the teleop bridge.
+        if mode == "velocity_jog":
+            target_position = current_position + linear_vel * dt
+            rotation_vector = angular_vel_rad_s * dt
+            delta_rotation = R.from_rotvec(rotation_vector).as_matrix()
+            target_orientation = delta_rotation @ current_orientation
         if utils.trajectory_state.get("jog_debug", False):
             try:
                 targ_eul_deg = R.from_matrix(target_orientation).as_euler('xyz', degrees=True)
-                print(f"[Jog] TARG pos(m)={np.round(target_position,4)} eulXYZ(deg)={np.round(targ_eul_deg,2)} vel_lin={np.round(linear_vel,4)} vel_ang(deg/s)={np.round(angular_deg_s,1)} dt={dt:.4f}")
+                print(f"[Jog] TARG mode={mode} pos(m)={np.round(target_position,4)} eulXYZ(deg)={np.round(targ_eul_deg,2)} vel_lin={np.round(linear_vel,4)} vel_ang(deg/s)={np.round(angular_deg_s,1)} dt={dt:.4f}")
             except Exception:
                 pass
 
         # 4. Solve IK for the new target pose
+        solve_start_time = time.perf_counter()
         q_target = ik_solver.solve_ik(
             target_position=target_position,
             target_orientation_matrix=target_orientation,
             initial_joint_angles=q_current
         )
+        solve_time_ms = (time.perf_counter() - solve_start_time) * 1000.0
         
         if q_target is not None:
             # 5. Enforce logical joint limits before commanding
@@ -1540,6 +1620,9 @@ def _jog_controller_thread():
                         actual_joint_angles_rad=actual_angles,
                         dt_s=dt,
                         command_age_s=time_since_last_cmd,
+                        target_age_s=target_age_s,
+                        solve_time_ms=solve_time_ms,
+                        teleop_mode=mode,
                     )
                     _update_jog_ik_status(
                         "joint_jump_rejected",
@@ -1548,9 +1631,13 @@ def _jog_controller_thread():
                         target_position_m=target_position,
                         command_linear_m_s=linear_vel,
                         command_angular_deg_s=angular_deg_s,
+                        q_goal_rad=q_target,
+                        q_commanded_rad=q_clamped,
                         q_delta_rad=q_delta,
                         dt_s=dt,
                         command_age_s=time_since_last_cmd,
+                        target_age_s=target_age_s,
+                        solve_time_ms=solve_time_ms,
                     )
                     loop_duration = time.monotonic() - loop_start_time
                     sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
@@ -1577,7 +1664,7 @@ def _jog_controller_thread():
                 actual_angles = None
                 diag_count = int(utils.trajectory_state.get("jog_diag_sample_count", 0)) + 1
                 utils.trajectory_state["jog_diag_sample_count"] = diag_count
-                if (
+                if mode == "absolute_pose" or (
                     utils.trajectory_state.get("jog_debug", False)
                     and diag_count % JOG_DIAG_SERVO_SAMPLE_INTERVAL == 0
                 ):
@@ -1595,19 +1682,36 @@ def _jog_controller_thread():
                     actual_joint_angles_rad=actual_angles,
                     dt_s=dt,
                     command_age_s=time_since_last_cmd,
+                    target_age_s=target_age_s,
+                    solve_time_ms=solve_time_ms,
+                    teleop_mode=mode,
                 )
-                q_current = q_clamped # Update our state for the next iteration's IK
+                if mode == "velocity_jog":
+                    q_current = q_clamped # Update our state for the next iteration's IK
+                elif actual_angles is not None:
+                    q_current = actual_angles
+                pose_error = target_position - current_position
+                orientation_error_deg = np.rad2deg(
+                    R.from_matrix(target_orientation @ current_orientation.T).as_rotvec()
+                )
                 _update_jog_ik_status(
                     "ok",
                     "IK solved and command applied",
                     current_position_m=current_position,
                     target_position_m=target_position,
                     position_step_m=float(np.linalg.norm(target_position - current_position)),
+                    pose_error_m=pose_error,
+                    orientation_error_deg=orientation_error_deg,
                     command_linear_m_s=linear_vel,
                     command_angular_deg_s=angular_deg_s,
+                    q_goal_rad=q_target,
+                    q_commanded_rad=q_clamped,
+                    q_measured_rad=actual_angles,
                     q_delta_rad=q_delta,
                     dt_s=dt,
                     command_age_s=time_since_last_cmd,
+                    target_age_s=target_age_s,
+                    solve_time_ms=solve_time_ms,
                 )
             except Exception as e:
                 print(f"[Jog] WARNING: Failed to clamp/apply joint limits: {e}")
@@ -1626,6 +1730,8 @@ def _jog_controller_thread():
                 command_angular_deg_s=angular_deg_s,
                 dt_s=dt,
                 command_age_s=time_since_last_cmd,
+                target_age_s=target_age_s,
+                solve_time_ms=solve_time_ms,
             )
 
         # --- Maintain loop frequency ---
@@ -1649,20 +1755,58 @@ def _jog_controller_thread():
     _update_jog_ik_status("stopped", "jog controller thread stopped")
 
 
-def handle_jog_start():
+def handle_set_jog_mode(mode: str):
+    """Select realtime jog control mode before or during a jog session."""
+    selected = _normalize_jog_mode(mode)
+    utils.trajectory_state["jog_mode"] = selected
+    if selected == "velocity_jog":
+        utils.trajectory_state["jog_target_position_m"] = None
+        utils.trajectory_state["jog_target_orientation_matrix"] = None
+    else:
+        utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
+    _update_jog_ik_status("mode_set", f"jog mode set to {selected}", teleop_mode=selected)
+    print(f"[Jog] Mode set to {selected}.")
+
+
+def handle_set_jog_target_pose(x, y, z, qx, qy, qz, qw):
+    """Update the absolute target tool pose for absolute_pose mode."""
+    if not utils.trajectory_state.get("is_jogging"):
+        return
+    quat = np.asarray([qx, qy, qz, qw], dtype=float)
+    norm = float(np.linalg.norm(quat))
+    if norm <= 1e-9 or not np.all(np.isfinite(quat)):
+        raise ValueError("target orientation quaternion must be finite and non-zero")
+    position = np.asarray([x, y, z], dtype=float)
+    if position.shape != (3,) or not np.all(np.isfinite(position)):
+        raise ValueError("target position must be finite xyz")
+    utils.trajectory_state["jog_target_position_m"] = position
+    utils.trajectory_state["jog_target_orientation_matrix"] = R.from_quat(quat / norm).as_matrix()
+    utils.trajectory_state["last_jog_target_time"] = time.monotonic()
+    utils.trajectory_state["last_jog_command_time"] = time.monotonic()
+    if utils.trajectory_state.get("jog_debug", False):
+        eul = R.from_matrix(utils.trajectory_state["jog_target_orientation_matrix"]).as_euler("xyz", degrees=True)
+        print(f"[Jog] Target pose update: pos={np.round(position, 4)} eulXYZ={np.round(eul, 2)}")
+
+
+def handle_jog_start(mode: str | None = None):
     """Starts the real-time jogging mode."""
     if utils.trajectory_state.get("is_running") or utils.trajectory_state.get("is_jogging"):
         print("[Jog] ERROR: Another motion is already active. Cannot start jog mode.")
         return
 
-    print("[Jog] Starting jog mode...")
+    selected_mode = _normalize_jog_mode(mode)
+    print(f"[Jog] Starting jog mode ({selected_mode})...")
     utils.trajectory_state["is_jogging"] = True
     utils.trajectory_state["weld_active"] = False
     utils.trajectory_state["current_weld_type"] = None
+    utils.trajectory_state["jog_mode"] = selected_mode
     utils.trajectory_state["last_jog_command_time"] = time.monotonic()
+    utils.trajectory_state["last_jog_target_time"] = 0.0
+    utils.trajectory_state["jog_target_position_m"] = None
+    utils.trajectory_state["jog_target_orientation_matrix"] = None
     utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
     utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
-    _update_jog_ik_status("starting", "jog start requested")
+    _update_jog_ik_status("starting", "jog start requested", teleop_mode=selected_mode)
 
     jog_thread = threading.Thread(target=_jog_controller_thread, daemon=True)
     utils.trajectory_state["jog_thread"] = jog_thread
@@ -1675,6 +1819,8 @@ def handle_jog_stop():
     _force_stop_jog_controller()
     utils.trajectory_state["weld_active"] = False
     utils.trajectory_state["current_weld_type"] = None
+    utils.trajectory_state["jog_target_position_m"] = None
+    utils.trajectory_state["jog_target_orientation_matrix"] = None
 
     _brake_to_current_position("jog stop")
     _close_jog_diag_log()

@@ -9,6 +9,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 QuaternionOrder = Literal["wxyz", "xyzw"]
+TeleopMode = Literal["velocity_jog", "absolute_pose"]
 
 
 def _vector3(value: Any, name: str) -> np.ndarray:
@@ -149,6 +150,7 @@ class BridgeConfig:
     family: str = "HEBI"
     name: str = "mobileIO"
     rate_hz: float = 25.0
+    teleop_mode: TeleopMode = "velocity_jog"
     lookup_wait_s: float = 1.0
     stale_timeout_s: float = 0.35
     request_timeout_s: float = 0.45
@@ -193,6 +195,10 @@ class BridgeConfig:
     diagnostic_log: bool = False
     diagnostic_log_interval_s: float = 0.1
     diagnostic_log_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.teleop_mode not in ("velocity_jog", "absolute_pose"):
+            raise ValueError("teleop_mode must be velocity_jog or absolute_pose")
 
     @property
     def period_s(self) -> float:

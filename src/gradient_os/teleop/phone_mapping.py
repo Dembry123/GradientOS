@@ -264,3 +264,13 @@ class SpatialPhoneMapper:
             angular_deg_s=self.filtered_angular_deg_s.copy(),
             gripper_deg_s=gripper_rate,
         )
+
+    def gripper_rate_for_axis(self, gripper_axis_value: float) -> float:
+        gripper_axis = _deadzone(gripper_axis_value, self.config.axis_deadzone)
+        return float(
+            np.clip(
+                gripper_axis * self.config.max_gripper_deg_s,
+                -self.config.max_gripper_deg_s,
+                self.config.max_gripper_deg_s,
+            )
+        )

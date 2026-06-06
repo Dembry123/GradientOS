@@ -548,8 +548,16 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @api.post("/control/jog/start", summary="Begin realtime jog mode")
-    async def control_jog_start():
-        await run_in_threadpool(_controller_call_or_503, "JOG_START", timeout=1.0, expect_response=False)
+    async def control_jog_start(payload: dict[str, Any] | None = None):
+        mode = None
+        if payload:
+            raw_mode = payload.get("mode") or payload.get("teleop_mode")
+            if raw_mode is not None:
+                mode = str(raw_mode).strip()
+                if mode not in {"velocity_jog", "absolute_pose"}:
+                    raise HTTPException(status_code=400, detail="mode must be velocity_jog or absolute_pose")
+        cmd = "JOG_START" if mode is None else f"JOG_START,{mode}"
+        await run_in_threadpool(_controller_call_or_503, cmd, timeout=1.0, expect_response=False)
         return {"status": "ok"}
 
     @api.post("/control/jog/stop", summary="Stop realtime jog mode")
@@ -567,6 +575,29 @@ def create_app() -> FastAPI:
         vx = _num("vx"); vy = _num("vy"); vz = _num("vz")
         v_roll = _num("v_roll"); v_pitch = _num("v_pitch"); v_yaw = _num("v_yaw")
         cmd = f"SET_JOG_VELOCITY,{vx},{vy},{vz},{v_roll},{v_pitch},{v_yaw}"
+        await run_in_threadpool(_controller_call_or_503, cmd, timeout=1.0, expect_response=False)
+        return {"status": "ok"}
+
+    @api.post("/control/jog/mode", summary="Set realtime jog control mode")
+    async def control_jog_mode(payload: dict[str, Any]):
+        mode = str(payload.get("mode") or payload.get("teleop_mode") or "").strip()
+        if mode not in {"velocity_jog", "absolute_pose"}:
+            raise HTTPException(status_code=400, detail="mode must be velocity_jog or absolute_pose")
+        await run_in_threadpool(_controller_call_or_503, f"SET_JOG_MODE,{mode}", timeout=1.0, expect_response=False)
+        return {"status": "ok", "mode": mode}
+
+    @api.post("/control/jog/target-pose", summary="Set realtime absolute jog target pose")
+    async def control_jog_target_pose(payload: dict[str, Any]):
+        position = _coerce_xyz_payload(payload.get("position_m"), "position_m")
+        quat = _coerce_quaternion_payload(payload.get("orientation_quat_xyzw"), "orientation_quat_xyzw")
+        norm = float(np.linalg.norm([quat["x"], quat["y"], quat["z"], quat["w"]]))
+        if norm <= 1e-9:
+            raise HTTPException(status_code=400, detail="orientation_quat_xyzw norm must be non-zero")
+        cmd = (
+            "SET_JOG_TARGET_POSE,"
+            f"{position['x']},{position['y']},{position['z']},"
+            f"{quat['x']},{quat['y']},{quat['z']},{quat['w']}"
+        )
         await run_in_threadpool(_controller_call_or_503, cmd, timeout=1.0, expect_response=False)
         return {"status": "ok"}
 

@@ -54,8 +54,9 @@ class GradientJogApiClient:
         )
         response.raise_for_status()
 
-    def start(self) -> None:
-        self._post("/control/jog/start")
+    def start(self, mode: str | None = None) -> None:
+        payload = {"mode": mode} if mode else None
+        self._post("/control/jog/start", payload)
 
     def stop(self) -> None:
         self._post("/control/jog/stop")
@@ -65,6 +66,25 @@ class GradientJogApiClient:
 
     def send_velocity(self, command: JogCommand) -> None:
         self._post("/control/jog/velocity", command.as_payload())
+
+    def send_target_pose(self, pose: RobotToolPose) -> None:
+        quat = pose.orientation.as_quat()
+        self._post(
+            "/control/jog/target-pose",
+            {
+                "position_m": {
+                    "x": float(pose.position_m[0]),
+                    "y": float(pose.position_m[1]),
+                    "z": float(pose.position_m[2]),
+                },
+                "orientation_quat_xyzw": {
+                    "x": float(quat[0]),
+                    "y": float(quat[1]),
+                    "z": float(quat[2]),
+                    "w": float(quat[3]),
+                },
+            },
+        )
 
     def send_gripper_velocity(self, command: JogCommand) -> None:
         self._post(

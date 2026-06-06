@@ -2517,8 +2517,6 @@ export default function App() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const panelSelectionOriginRef = useRef<"tree" | "weld" | null>(null);
   const trajectoryRefreshInFlight = useRef(false);
-  const lastTelemetrySourceTimeRef = useRef<number | null>(null);
-  const lastAcceptedJointsRef = useRef<number[] | null>(null);
 
   const disconnect = useCallback(() => {
     eventSourceRef.current?.close();
@@ -2551,8 +2549,6 @@ export default function App() {
     setIsSavingWeldProgram(false);
     setIsLoadingWeldProgram(false);
     setPendingWeldProgramRestore(null);
-    lastTelemetrySourceTimeRef.current = null;
-    lastAcceptedJointsRef.current = null;
   }, []);
 
   const handleMessage = useCallback((payload: string) => {
@@ -2563,18 +2559,9 @@ export default function App() {
     let weldActiveValue: boolean | undefined;
     let weldTypeValue: string | undefined;
     let jogIkValue: JogIkTelemetry | undefined;
-    let sourceTimeSec: number | undefined;
 
     try {
       const parsed = JSON.parse(payload);
-      if (typeof parsed?.t === "number" && Number.isFinite(parsed.t)) {
-        sourceTimeSec = parsed.t;
-      } else if (typeof parsed?.t === "string") {
-        const parsedTime = Number(parsed.t);
-        if (Number.isFinite(parsedTime)) {
-          sourceTimeSec = parsedTime;
-        }
-      }
       if (Array.isArray(parsed?.joints)) {
         joints = parsed.joints
           .map((value: unknown) =>
@@ -2635,37 +2622,6 @@ export default function App() {
       weld_type: weldTypeValue,
       jog_ik: jogIkValue,
     };
-
-    const candidateTimeSec = sourceTimeSec ?? next.timestamp / 1000;
-    const lastTimeSec = lastTelemetrySourceTimeRef.current;
-    if (lastTimeSec !== null && candidateTimeSec <= lastTimeSec) {
-      // Drop out-of-order telemetry packets to prevent visual snap-backs.
-      return;
-    }
-    if (Array.isArray(joints) && joints.length > 0 && lastAcceptedJointsRef.current) {
-      const previous = lastAcceptedJointsRef.current;
-      if (previous.length === joints.length) {
-        let maxJump = 0;
-        for (let i = 0; i < joints.length; i += 1) {
-          const jump = Math.abs(joints[i] - previous[i]);
-          if (jump > maxJump) {
-            maxJump = jump;
-          }
-        }
-        const dtSec =
-          lastTimeSec !== null ? Math.max(0, candidateTimeSec - lastTimeSec) : Number.POSITIVE_INFINITY;
-        // Reject single-frame spikes (commonly stale packets) that imply impossible
-        // arm motion over one telemetry interval.
-        if (dtSec <= 0.25 && maxJump > 0.8) {
-          return;
-        }
-      }
-    }
-
-    lastTelemetrySourceTimeRef.current = candidateTimeSec;
-    if (Array.isArray(joints) && joints.length > 0) {
-      lastAcceptedJointsRef.current = joints.slice();
-    }
 
     setLatest(next);
     // Merge alerts into state (keep last 20)

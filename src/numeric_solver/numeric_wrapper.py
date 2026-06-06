@@ -81,36 +81,6 @@ def _ensure_loaded(dh_csv_path: str):
     except Exception as e:
         raise RuntimeError(f"Failed to create pyquik.IKSolver: {e}")
 
-    # Attach a Python-level convenience for batched IK if not present.
-    # 2a. Provide single-pose IK alias expected by numeric_wrapper/ik_solver.
-    if not hasattr(_NUMERIC_IKSOLVER, "ik"):
-        def _ik(quat: np.ndarray, pos: np.ndarray, seed: np.ndarray):
-            """Thin wrapper around the C++ .solve method to mimic original API."""
-            q_vec, e_vec, iters, br = _NUMERIC_IKSOLVER.solve(quat, pos, seed)
-            return np.asarray(q_vec, dtype=float), np.asarray(e_vec, dtype=float), iters, br
-
-        _NUMERIC_IKSOLVER.ik = _ik  # type: ignore
-
-    # 2b. Provide batch path solver if missing
-    if not hasattr(_NUMERIC_IKSOLVER, "solve_ik_path"):
-
-        def _solve_ik_path(poses_batch: np.ndarray, initial_joint_angles: np.ndarray):
-            """Fallback: loop over poses if C++ batch API unavailable."""
-            out = []
-            q_seed = initial_joint_angles
-            for pose in poses_batch:
-                px, py_, pz, *rot_flat = pose
-                rot_m = np.array(rot_flat, dtype=float).reshape(3, 3)
-                quat = Rotation.from_matrix(rot_m).as_quat()
-                q, _, _, _ = _NUMERIC_IKSOLVER.ik(quat, np.array([px, py_, pz]), q_seed)
-                if q is None:
-                    return None
-                out.append(q)
-                q_seed = q
-            return np.vstack(out)
-
-        _NUMERIC_IKSOLVER.solve_ik_path = _solve_ik_path  # type: ignore
-
     return _NUMERIC_ROBOT, _NUMERIC_IKSOLVER
 
 
@@ -127,7 +97,9 @@ def init_numeric_solver(dh_csv_path: str):
 def numeric_fk(joint_angles: np.ndarray) -> np.ndarray:
     """Forward kinematics: ndarray(6,) → 4×4 H-matrix (numpy)."""
     robot, _ = _ensure_loaded("mini-6dof-arm/dh_params.csv")
-    return robot.fk(joint_angles)  # Assumes pyquik Robot.fk returns np.ndarray
+    if hasattr(robot, "fk"):
+        return robot.fk(joint_angles)
+    return robot.FK(joint_angles)
 
 
 def numeric_ik(quat: np.ndarray, pos: np.ndarray, seed: np.ndarray | None = None):
@@ -139,7 +111,15 @@ def numeric_ik(quat: np.ndarray, pos: np.ndarray, seed: np.ndarray | None = None
     if seed is None:
         seed = np.zeros(solver.R.dof if hasattr(solver, "R") else 6, dtype=float)
 
-    return solver.ik(quat, pos, seed)
+    if hasattr(solver, "ik"):
+        return solver.ik(quat, pos, seed)
+    q_vec, e_vec, iters, reason = solver.solve(quat, pos, seed)
+    return (
+        np.asarray(q_vec, dtype=float),
+        np.asarray(e_vec, dtype=float),
+        iters,
+        reason,
+    )
 
 
 # Keep orientation helper functions below (already present) unchanged.

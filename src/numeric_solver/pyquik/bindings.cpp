@@ -1,8 +1,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/eigen.h>
 #include <pybind11/stl.h>
+#include <iostream>
 #include <memory>
 #include "Eigen/Dense"
+
+using std::cout;
+using std::endl;
+
 #include "quik/Robot.hpp"
 #include "quik/IKSolver.hpp"
 

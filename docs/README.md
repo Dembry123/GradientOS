@@ -104,6 +104,16 @@ Defaults:
 - Web UI: `http://localhost:8000`
 - API: `http://localhost:4000`
 
+For local development, the `./start` launcher starts controller, API, and web UI without the vision service:
+
+```bash
+./start --sim=true --solver=ikfast --teleop-mode=velocity_jog --joint-speed-limit=800 --jog-frequency=25
+./start --sim=true --solver=quik --teleop-mode=absolute_pose --joint-speed-limit=300 --jog-frequency=30
+./start --real --solver=dls --teleop-mode=absolute_pose --joint-speed-limit=200
+```
+
+Solver choices are `ikfast`, `quik`, `trac`, `dls`, and `qp`. `trac` requires `trac_ik_python`; if that native dependency is missing the backend fails clearly at startup. See `docs/ik_solver.md` for solver setup and benchmarking.
+
 ## First-Run Operator Workflow (Web UI)
 
 1. Open the UI and set API host if needed.

@@ -240,6 +240,34 @@ def test_control_jog_gripper_velocity(client):
     assert client.command_calls[-1] == ("SET_GRIPPER_JOG_VELOCITY,12.5", 1.0, False)
 
 
+def test_control_jog_start_accepts_mode(client):
+    resp = client.post("/control/jog/start", json={"mode": "absolute_pose"})
+    assert resp.status_code == 200
+    assert client.command_calls[-1] == ("JOG_START,absolute_pose", 1.0, False)
+
+
+def test_control_jog_mode_endpoint(client):
+    resp = client.post("/control/jog/mode", json={"mode": "velocity_jog"})
+    assert resp.status_code == 200
+    assert client.command_calls[-1] == ("SET_JOG_MODE,velocity_jog", 1.0, False)
+
+
+def test_control_jog_target_pose(client):
+    resp = client.post(
+        "/control/jog/target-pose",
+        json={
+            "position_m": {"x": 0.4, "y": 0.0, "z": 0.3},
+            "orientation_quat_xyzw": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+        },
+    )
+    assert resp.status_code == 200
+    assert client.command_calls[-1] == (
+        "SET_JOG_TARGET_POSE,0.4,0.0,0.3,0.0,0.0,0.0,1.0",
+        1.0,
+        False,
+    )
+
+
 def test_teleop_phone_pose_round_trip(client):
     payload = {
         "source": "test",

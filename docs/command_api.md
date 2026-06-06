@@ -97,9 +97,13 @@ SET_ORIENTATION,0,30,0,1.5,true
 ```
 
 #### `JOG_START`
--   **Syntax:** `JOG_START`
--   **Description:** Enables real-time Cartesian jogging mode. While active, the controller runs a 25 Hz loop that integrates target Cartesian and angular velocities and solves IK each step. This mode can run in parallel with trajectory recording and telemetry.
+-   **Syntax:** `JOG_START[,velocity_jog|absolute_pose]`
+-   **Description:** Enables real-time Cartesian jogging mode. `velocity_jog` is the existing mode: the controller runs a 25 Hz loop that integrates target Cartesian and angular velocities and solves IK each step. `absolute_pose` consumes direct target tool poses from `SET_JOG_TARGET_POSE` and solves IK against that full pose each tick.
     -   Backend safety: Linear and angular jog rates are capped server-side; IK solutions are clamped to `LOGICAL_JOINT_LIMITS_RAD` before commanding.
+
+#### `SET_JOG_MODE`
+-   **Syntax:** `SET_JOG_MODE,velocity_jog|absolute_pose`
+-   **Description:** Changes the active realtime jog control mode. `velocity_jog` uses `SET_JOG_VELOCITY`; `absolute_pose` uses `SET_JOG_TARGET_POSE`.
 
 #### `SET_JOG_VELOCITY`
 -   **Syntax:** `SET_JOG_VELOCITY,vx,vy,vz,v_roll,v_pitch,v_yaw`
@@ -108,6 +112,10 @@ SET_ORIENTATION,0,30,0,1.5,true
     -   `vx, vy, vz` (float, required): Linear velocities in meters/second (base frame).
     -   `v_roll, v_pitch, v_yaw` (float, required): Angular rates in degrees/second (XYZ intrinsic order).
 -   Notes: If no `SET_JOG_VELOCITY` is received for 0.5 s, velocities are auto-zeroed for safety.
+
+#### `SET_JOG_TARGET_POSE`
+-   **Syntax:** `SET_JOG_TARGET_POSE,x,y,z,qx,qy,qz,qw`
+-   **Description:** Updates the absolute target tool pose for `absolute_pose` mode. Position is meters in the robot base frame. Quaternion order is `xyzw`. If no fresh target pose is received for 0.5 s, the controller holds instead of pursuing the stale target.
 
 #### `JOG_STOP`
 -   **Syntax:** `JOG_STOP`

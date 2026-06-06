@@ -252,6 +252,12 @@ trajectory_state = {
     # 6D velocity vector: [vx, vy, vz, v_roll, v_pitch, v_yaw]
     "jog_velocities": np.zeros(6, dtype=float),
     "last_jog_command_time": 0.0,
+    # Teleop mode: velocity_jog keeps the existing velocity integration path;
+    # absolute_pose consumes a direct target tool pose.
+    "jog_mode": "velocity_jog",
+    "jog_target_position_m": None,
+    "jog_target_orientation_matrix": None,
+    "last_jog_target_time": 0.0,
     # Deadman gate for jog (must be True to apply non-zero velocities)
     "jog_deadman": False,
     # Jog debug logging verbosity flag

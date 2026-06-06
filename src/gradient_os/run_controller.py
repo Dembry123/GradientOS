@@ -525,7 +525,8 @@ Examples:
                 # ------------------------------------------------------------------
                 elif command == "JOG_START":
                     try:
-                        command_api.handle_jog_start()
+                        mode = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+                        command_api.handle_jog_start(mode)
                         try:
                             sock.sendto("ACK,JOG_START".encode("utf-8"), addr)
                         except Exception:
@@ -553,6 +554,27 @@ Examples:
                             command_api.handle_set_jog_velocity(vx, vy, vz, v_roll, v_pitch, v_yaw)
                     except ValueError:
                         print("[Controller] Error: Non-numeric value in SET_JOG_VELOCITY.")
+
+                elif command == "SET_JOG_MODE":
+                    try:
+                        if len(parts) < 2:
+                            print("[Controller] Error: SET_JOG_MODE requires a mode.")
+                        else:
+                            command_api.handle_set_jog_mode(parts[1])
+                    except Exception as e:
+                        print(f"[Controller] Error parsing SET_JOG_MODE: {e}")
+
+                elif command == "SET_JOG_TARGET_POSE":
+                    try:
+                        if len(parts) < 8:
+                            print("[Controller] Error: SET_JOG_TARGET_POSE requires x,y,z,qx,qy,qz,qw.")
+                        else:
+                            x, y, z, qx, qy, qz, qw = map(float, parts[1:8])
+                            command_api.handle_set_jog_target_pose(x, y, z, qx, qy, qz, qw)
+                    except ValueError:
+                        print("[Controller] Error: Non-numeric value in SET_JOG_TARGET_POSE.")
+                    except Exception as e:
+                        print(f"[Controller] Error parsing SET_JOG_TARGET_POSE: {e}")
 
                 elif command == "SET_GRIPPER_JOG_VELOCITY":
                     try:
