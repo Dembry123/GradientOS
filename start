@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+REPO_ROOT="${PWD}"
+VENV_BIN="${REPO_ROOT}/.venv/bin"
+VENV_PY="${VENV_BIN}/python"
+WEB_DIR="${REPO_ROOT}/web-ui"
+
+SIM_MODE=true
+SOLVER="ikfast"
+JOG_FREQUENCY="25"
+JOINT_SPEED_LIMIT="800"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./start [options]
+
+Starts the GradientOS stack without the vision service:
+  - controller
+  - API
+  - web UI
+
+Options:
+  --sim=true|false              Use simulator or real servos (default: true)
+  --sim                         Shortcut for --sim=true
+  --real                        Shortcut for --sim=false
+  --solver=ikfast|quik|numeric  IK backend (quik maps to numeric)
+  --jog-frequency=N             Jog loop frequency in Hz (default: 25)
+  --joint-speed-limit=N         Raw Feetech jog speed register, 1..800 (default: 800)
+  -h, --help                    Show this help
+
+Examples:
+  ./start
+  ./start --sim=false --solver=ikfast --joint-speed-limit=400 --jog-frequency=50
+  ./start --real --solver=quik --joint-speed-limit=300
+USAGE
+}
+
+parse_bool() {
+  case "$1" in
+    true|TRUE|yes|YES|1|on|ON) echo true ;;
+    false|FALSE|no|NO|0|off|OFF) echo false ;;
+    *)
+      echo "[gradient-robotics] ERROR: Expected boolean true/false, got '$1'." >&2
+      exit 2
+      ;;
+  esac
+}
+
+require_positive_int() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]] || [[ "${value}" -lt 1 ]]; then
+    echo "[gradient-robotics] ERROR: ${name} must be a positive integer, got '${value}'." >&2
+    exit 2
+  fi
+}
+
+for arg in "$@"; do
+  case "${arg}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --sim)
+      SIM_MODE=true
+      ;;
+    --real)
+      SIM_MODE=false
+      ;;
+    --sim=*)
+      SIM_MODE="$(parse_bool "${arg#*=}")"
+      ;;
+    --solver=*)
+      SOLVER="${arg#*=}"
+      ;;
+    --jog-frequency=*)
+      JOG_FREQUENCY="${arg#*=}"
+      ;;
+    --joint-speed-limit=*)
+      JOINT_SPEED_LIMIT="${arg#*=}"
+      ;;
+    *)
+      echo "[gradient-robotics] ERROR: Unknown option '${arg}'." >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+require_positive_int "--jog-frequency" "${JOG_FREQUENCY}"
+require_positive_int "--joint-speed-limit" "${JOINT_SPEED_LIMIT}"
+
+if [[ "${JOINT_SPEED_LIMIT}" -gt 800 ]]; then
+  echo "[gradient-robotics] ERROR: --joint-speed-limit must be in raw Feetech range 1..800." >&2
+  exit 2
+fi
+
+case "${SOLVER}" in
+  ikfast)
+    MINI_ARM_SOLVER_VALUE="ikfast"
+    ;;
+  quik|numeric)
+    MINI_ARM_SOLVER_VALUE="numeric"
+    ;;
+  qp|qpdiff|differential-qp|trac)
+    echo "[gradient-robotics] ERROR: Solver '${SOLVER}' is not integrated yet." >&2
+    echo "[gradient-robotics] Available today: ikfast, quik (numeric)." >&2
+    exit 2
+    ;;
+  *)
+    echo "[gradient-robotics] ERROR: Unknown solver '${SOLVER}'." >&2
+    echo "[gradient-robotics] Available today: ikfast, quik (numeric)." >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! -x "${VENV_PY}" ]]; then
+  echo "[gradient-robotics] ERROR: Missing ${VENV_PY}" >&2
+  echo "[gradient-robotics] Run ./setup.sh or create the repo-local .venv first." >&2
+  exit 1
+fi
+
+if [[ ! -d "${WEB_DIR}" ]]; then
+  echo "[gradient-robotics] ERROR: Missing web UI directory at ${WEB_DIR}" >&2
+  exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "[gradient-robotics] ERROR: npm not found on PATH. Install Node.js/npm to run the web UI." >&2
+  exit 1
+fi
+
+if [[ -d "${VENV_BIN}" ]]; then
+  export PATH="${VENV_BIN}:${PATH}"
+fi
+export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
+export MINI_ARM_SOLVER="${MINI_ARM_SOLVER_VALUE}"
+export GRADIENT_JOG_FREQUENCY_HZ="${JOG_FREQUENCY}"
+export GRADIENT_JOG_SERVO_SPEED_REGISTER="${JOINT_SPEED_LIMIT}"
+
+LOG_DIR="${REPO_ROOT}/logs/stack/$(date +%Y%m%d_%H%M%S)"
+mkdir -p "${LOG_DIR}"
+
+pids=()
+names=()
+
+launch() {
+  local name="$1"
+  shift
+  local log_file="${LOG_DIR}/${name}.log"
+  echo "[gradient-robotics] Starting ${name}; log: ${log_file}"
+  "$@" >"${log_file}" 2>&1 &
+  pids+=("$!")
+  names+=("${name}")
+}
+
+stop_all() {
+  local status="${1:-0}"
+  trap - INT TERM EXIT
+  if [[ ${#pids[@]} -gt 0 ]]; then
+    echo "[gradient-robotics] Stopping stack..."
+    for pid in "${pids[@]}"; do
+      kill "${pid}" >/dev/null 2>&1 || true
+    done
+    for pid in "${pids[@]}"; do
+      wait "${pid}" >/dev/null 2>&1 || true
+    done
+  fi
+  exit "${status}"
+}
+
+trap 'stop_all 130' INT
+trap 'stop_all 143' TERM
+trap 'stop_all $?' EXIT
+
+controller_cmd=("${VENV_PY}" -m gradient_os.run_controller)
+if [[ "${SIM_MODE}" == "true" ]]; then
+  controller_cmd+=(--sim)
+elif [[ -n "${SERIAL_PORT:-}" ]]; then
+  controller_cmd+=(--serial-port "${SERIAL_PORT}")
+fi
+
+echo "[gradient-robotics] Stack config:"
+echo "  sim=${SIM_MODE}"
+echo "  solver=${SOLVER} (MINI_ARM_SOLVER=${MINI_ARM_SOLVER})"
+echo "  jog_frequency=${GRADIENT_JOG_FREQUENCY_HZ} Hz"
+echo "  joint_speed_limit=${GRADIENT_JOG_SERVO_SPEED_REGISTER} raw register"
+echo "  vision=false"
+
+launch controller "${controller_cmd[@]}"
+launch api "${VENV_PY}" -m gradient_os.api.main
+launch web bash -c 'cd "$1" && exec npm run dev' _ "${WEB_DIR}"
+
+cat <<EOF
+[gradient-robotics] Stack started.
+  API:    http://127.0.0.1:${GRADIENT_API_PORT:-4000}
+  Web UI: http://127.0.0.1:8000
+  Logs:   ${LOG_DIR}
+
+Press Ctrl-C to stop all services.
+EOF
+
+while true; do
+  for index in "${!pids[@]}"; do
+    pid="${pids[$index]}"
+    if ! kill -0 "${pid}" >/dev/null 2>&1; then
+      status=0
+      wait "${pid}" || status="$?"
+      echo "[gradient-robotics] ${names[$index]} exited with status ${status}." >&2
+      stop_all "${status}"
+    fi
+  done
+  sleep 1
+done

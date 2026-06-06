@@ -1147,7 +1147,26 @@ def handle_get_gripper_state(sock: 'socket.socket', addr: tuple):
 # Real-time Cartesian Jogging
 # -----------------------------------------------------------------------------
 
-JOG_CONTROL_FREQUENCY_HZ = 25
+def _env_int(name: str, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[Jog] WARNING: Ignoring invalid {name}={raw!r}; using {default}.")
+        return default
+    if min_value is not None and value < min_value:
+        print(f"[Jog] WARNING: Clamping {name}={value} to {min_value}.")
+        return min_value
+    if max_value is not None and value > max_value:
+        print(f"[Jog] WARNING: Clamping {name}={value} to {max_value}.")
+        return max_value
+    return value
+
+
+JOG_CONTROL_FREQUENCY_HZ = _env_int("GRADIENT_JOG_FREQUENCY_HZ", 25, min_value=1)
+JOG_SERVO_SPEED_REGISTER = _env_int("GRADIENT_JOG_SERVO_SPEED_REGISTER", 800, min_value=1, max_value=800)
 JOG_VELOCITY_TIMEOUT_S = 0.5  # If no command received in this time, stop
 MAX_JOG_LINEAR_M_S = 0.2      # Safety cap per-axis
 MAX_JOG_ANGULAR_DEG_S = 180.0 # Safety cap per-axis
@@ -1554,7 +1573,7 @@ def _jog_controller_thread():
                         time.sleep(sleep_time)
                     continue
 
-                actuators.set_joint_positions(q_clamped, 800, 0)
+                actuators.set_joint_positions(q_clamped, JOG_SERVO_SPEED_REGISTER, 0)
                 actual_angles = None
                 diag_count = int(utils.trajectory_state.get("jog_diag_sample_count", 0)) + 1
                 utils.trajectory_state["jog_diag_sample_count"] = diag_count

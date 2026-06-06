@@ -75,6 +75,8 @@ def _find_closest_solution(solutions, current_joint_angles):
 # -----------------------------------------------------------
 
 _BACKEND_NAME: str = os.getenv("MINI_ARM_SOLVER", "ikfast").lower()  # set ikfast as default
+if _BACKEND_NAME == "quik":
+    _BACKEND_NAME = "numeric"
 # _BACKEND_NAME: str = os.getenv("MINI_ARM_SOLVER", "numeric").lower()   # set numeric as default
 
 # These module-level globals will be filled by the selected backend loader.
