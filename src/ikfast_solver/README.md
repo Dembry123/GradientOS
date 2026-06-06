@@ -7,7 +7,7 @@ This directory contains the C++ source code for the high-performance inverse kin
 - **`ikfast.h`**: The header file from OpenRAVE defining the IKFast C++ API.
 - **`ikfast_solver.cpp`**: The auto-generated C++ code for the mini-6dof-arm's specific kinematics. This file is highly complex and should not be edited manually.
 - **`ik_wrapper.cpp`**: A C++ wrapper that uses `pybind11` to expose the core IKFast functions (`ComputeFk`, `ComputeIk`, etc.) to Python. This is where the logic for selecting the best IK solution from multiple results resides.
-- **`ikfast_wrapper.py`**: A Python class that provides a high-level, user-friendly interface to the compiled C++ module. This is the class that is imported and used by the `arm_controller` package.
+- **`gradient_os/ik_backends/ikfast_backend.py`**: The Python backend adapter that imports the compiled extension directly and translates between IKFast's wrist frame and the public tool frame used by the controller.
 - **`CMakeLists.txt`**: The build script for compiling the C++ source into a Python extension module (`.so` file on Linux).
 
 ## Building

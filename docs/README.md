@@ -104,12 +104,13 @@ Defaults:
 - Web UI: `http://localhost:8000`
 - API: `http://localhost:4000`
 
-For local development, the `./start` launcher starts controller, API, and web UI without the vision service:
+For local development, the `./start` launcher starts controller, API, web UI, and the HEBI Mobile I/O bridge without the vision service:
 
 ```bash
 ./start --sim=true --solver=ikfast --teleop-mode=velocity_jog --joint-speed-limit=800 --jog-frequency=25
 ./start --sim=true --solver=quik --teleop-mode=absolute_pose --joint-speed-limit=300 --jog-frequency=30
 ./start --real --solver=dls --teleop-mode=absolute_pose --joint-speed-limit=200
+./start --hebi-dry-run
 ```
 
 Solver choices are `ikfast`, `quik`, `trac`, `dls`, and `qp`. `trac` requires `trac_ik_python`; if that native dependency is missing the backend fails clearly at startup. See `docs/ik_solver.md` for solver setup and benchmarking.
@@ -229,14 +230,16 @@ gradient-ui           # Graphical user interface
 gradient-cli          # Command-line interface
 gradient-vision       # Vision module CLI (cameras, processing, streaming)
 gradient-api          # FastAPI proxy that exposes REST/SSE telemetry
+gradient-iphone-hebi-teleop  # HEBI Mobile I/O phone teleop bridge
 ```
 
 Component extras:
 - Core (`gradient-controller`, `gradient-api`) are installed by default.
 - UI/CLI tooling requires the `ui` extra: `uv pip install -e .[ui]`.
 - Camera/vision tooling (including telemetry capture) lives behind the `vision` extra: `uv pip install -e .[vision]`.
+- HEBI Mobile I/O phone teleop requires the `phone` extra: `uv pip install -e .[phone]`.
 - Raspberry Pi CSI cameras need the separate `picamera` extra: `uv pip install -e .[picamera]`.
-- Combine extras as needed, e.g. `uv pip install -e .[ui,vision,ai]` for full tooling.
+- Combine extras as needed, e.g. `uv pip install -e .[ui,vision,ai,phone]` for full tooling.
 - Raspberry Pi camera support still needs the system `picamera2` stack (typically installed via `sudo apt install -y python3-libcamera python3-picamera2`).
 
 Notes:
@@ -297,7 +300,7 @@ On the iPhone:
 - In iOS Settings for Mobile I/O, set family/name to `HEBI` / `mobileIO` unless you pass different CLI flags.
 - Allow camera access so ARKit pose is available.
 
-Run discovery and mapping in dry-run mode first:
+`./start` launches the bridge in live API mode by default. Use `./start --hebi-dry-run` for dry-run mapping or `./start --no-hebi-bridge` if you want to run the bridge separately. For standalone discovery and mapping:
 
 ```bash
 gradient-iphone-hebi-teleop \
@@ -305,7 +308,7 @@ gradient-iphone-hebi-teleop \
   --list-devices
 ```
 
-Hold the phone screen-up with the top edge pointing the same direction as the gripper, then hold **B1**. B1 is also the translation recenter/clutch control: release it, reposition the phone comfortably, then hold B1 again to seed phone translation from the robot's current tool position. Each B1 latch captures the phone's current ARKit orientation as the translation frame, so fresh ARKit origins/headings are normalized by the latch. The default phone-axis map is `y,-x,z`: HEBI/ARKit phone-local `+Y` maps to robot `+X`, phone-local `+X` maps to robot `-Y`, and phone-local `+Z` maps to robot `+Z`. This makes moving the phone forward from the held pose map to teleop forward even if Mobile I/O started with a different world heading. Orientation is intentionally different: the first live latch calibrates phone orientation to tool orientation, and later B1 re-engages keep using the phone's current physical orientation as the desired tool orientation under the normal angular speed/IK limits. Dry-run prints the jog commands it would send without moving the robot. To command the running GradientOS API after confirming the mapping feels right:
+Hold the phone screen-up with the top edge pointing the same direction as the gripper, then hold **B1**. B1 is also the translation recenter/clutch control: release it, reposition the phone comfortably, then hold B1 again to seed phone translation from the robot's current tool position. Each B1 latch captures the phone's current ARKit orientation as the translation frame, so fresh ARKit origins/headings are normalized by the latch. The default phone-axis map is `y,-x,z`: HEBI/ARKit phone-local `+Y` maps to robot `+X`, phone-local `+X` maps to robot `-Y`, and phone-local `+Z` maps to robot `+Z`. This makes moving the phone forward from the held pose map to teleop forward even if Mobile I/O started with a different world heading. Orientation is intentionally different: the first live latch calibrates phone orientation to tool orientation, and later B1 re-engages keep using the phone's current physical orientation as the desired tool orientation under the normal angular speed/IK limits. Dry-run prints the jog commands it would send without moving the robot. To command the running GradientOS API from a separate bridge process after confirming the mapping feels right:
 
 ```bash
 gradient-iphone-hebi-teleop \
@@ -400,8 +403,8 @@ flowchart TD
     *   **`trajectory_execution.py`:** This module contains the most complex logic. It takes high-level goals (like "move from A to B in a straight line") and performs two key steps:
         1.  **Planning:** It calls the `ik_solver` to plan the entire path, converting the Cartesian trajectory into a dense series of joint angle solutions.
         2.  **Execution:** It starts a background thread (`_closed_loop_executor_thread`) to execute this path, using feedback from the servos to correct for errors in real time.
-    *   **`ik_solver.py`:** This is a Python wrapper that provides a clean interface to the high-performance C++ IKFast solver.
-    *   **`ikfast_solver` (C++):** The compiled IKFast library that can solve for the robot's joint angles for a given end-effector pose with extreme speed.
+    *   **`ik_solver.py`:** This is a thin facade that selects the configured IK backend and exposes FK/IK functions to the controller.
+    *   **`ik_backends`:** Backend adapters for IKFast, QuIK, TRAC-IK, DLS, and QP solvers. The IKFast backend imports the compiled C++ extension directly.
     *   **`actuator_runtime.py`:** App-facing helpers that call the active `ActuatorBackend` and keep shared runtime state in `utils.py` synchronized.
     *   **`backends/feetech/driver.py`:** The Feetech serial-servo backend. It owns serial setup, servo discovery, PID/limit writes, logical-to-physical mapping, sync reads/writes, and calibration.
     *   **`backends/feetech/protocol.py`:** Feetech packet construction/parsing used internally by `FeetechBackend`.
@@ -415,9 +418,9 @@ The high performance of the system's motion planning is made possible by the C++
 
 *   **IKFast:** The core of the solver is auto-generated by [OpenRAVE's IKFast tool](http://openrave.org/docs/latest_stable/openravepy/ikfast/). We provide our robot's `.urdf` file to IKFast, and it produces a C++ file containing the complex trigonometric equations that analytically solve for the joint angles. Because it's an analytic solution, it is extremely fast (on the order of microseconds) and can return all possible valid solutions.
 
-*   **`ikfast_solver.cpp`:** This file contains the primary `IKFastSolver` C++ class. It `#include`s the auto-generated solver code and provides clean C++ methods (`solve_ik`, `compute_fk`, `solve_ik_path`) that our Python wrapper can bind to. The `solve_ik_path` method is particularly important, as it contains an optimized C++ loop for solving sequential points, which is much faster than iterating in Python.
+*   **`ikfast_solver.cpp`:** This file is the auto-generated solver code. It contains the trigonometric equations emitted by IKFast for this robot's geometry and should not be edited by hand.
 
-*   **`ik_wrapper.cpp`:** This file uses the [pybind11](https://github.com/pybind/pybind11) library to create the Python bindings for our `IKFastSolver` class. It exposes the C++ methods so that they can be called directly from Python as if they were native Python functions. This is what allows `ik_solver.py` to call `IK_SOLVER.solve_ik_path(...)`.
+*   **`ik_wrapper.cpp`:** This file uses the [pybind11](https://github.com/pybind/pybind11) library to expose `get_num_joints`, `solve_ik`, `solve_ik_batch`, and `compute_fk` as the compiled `ikfast_pybind` module. `gradient_os.ik_backends.ikfast_backend` imports that module directly.
 
 *   **`CMakeLists.txt`:** This is the build script for the C++ module. It handles finding the `pybind11` and `Python.h` libraries and compiling the C++ source files into a single `.so` (shared object) file that Python can import as a native module.
 

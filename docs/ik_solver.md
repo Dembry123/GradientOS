@@ -14,7 +14,7 @@ gradient_os.ik_solver
   -> gradient_os.ik_backends.qp_backend.QpBackend
 ```
 
-All public solver calls use the same public tool frame: the pose is the robot `tool_link`, not an internal wrist center. IKFast still subtracts `END_EFFECTOR_OFFSET` internally because its generated solver targets the wrist. QuIK has its own raw end-effector convention, so the wrapper establishes a fixed transform between raw QuIK zero FK and the URDF/public zero tool pose. DLS and QP use the URDF tool frame directly. TRAC-IK targets `base` to `tool_link` from `mini-6dof-arm/mini-6dof-arm.urdf`.
+All public solver calls use the same public tool frame: the pose is the robot `tool_link`, not an internal wrist center. IKFast still subtracts `END_EFFECTOR_OFFSET` internally because its generated solver targets the wrist. QuIK has its own raw end-effector convention, so the backend establishes a fixed transform between raw QuIK zero FK and the URDF/public zero tool pose. DLS and QP use the URDF tool frame directly. TRAC-IK targets `base` to `tool_link` from `mini-6dof-arm/mini-6dof-arm.urdf`.
 
 ### Solver Backends
 
@@ -26,7 +26,7 @@ All public solver calls use the same public tool frame: the pose is the robot `t
 scripts/build_pyquik.sh
 ```
 
-`trac` uses the optional `trac_ik_python` package through `src/numeric_solver/trac_ik_interface.py`. This backend is wired in, but it intentionally fails at startup if `trac_ik_python` is not installed. It does not fall back to IKFast.
+`trac` uses the optional `trac_ik_python` package directly from `gradient_os.ik_backends.trac_backend`. This backend is wired in, but it intentionally fails at startup if `trac_ik_python` is not installed. It does not fall back to IKFast.
 
 `dls` is a Python damped-least-squares differential IK backend. It uses finite-difference FK/Jacobian, joint limits, bounded per-iteration joint steps, and iterative convergence on full pose error.
 

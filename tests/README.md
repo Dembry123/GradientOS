@@ -32,6 +32,6 @@ Pytest will automatically discover and run all test files (files named `test_*.p
 
 -   `test_planning.py`: Focuses on unit testing the core algorithms within `trajectory_execution.py`. It specifically tests the path unwrapping and smoothing logic to ensure that generated joint-space trajectories are continuous and do not contain unnecessary "wrap-around" jumps.
 
--   `test_solver.py`: An integration test for the C++ IKFast wrapper (`ikfast_wrapper.py`). It performs sanity checks to ensure that Forward Kinematics (FK) and Inverse Kinematics (IK) are consistent and that the batch IK solver can process a sequence of poses correctly.
+-   `test_solver.py`: An integration test for the IKFast backend. It performs sanity checks to ensure that Forward Kinematics (FK) and Inverse Kinematics (IK) are consistent and that the batch IK solver can process a sequence of poses correctly.
 
 -   `test_end_to_end.py`: Provides high-level integration tests that simulate the full control loop, from receiving a UDP command to issuing backend actuator commands.

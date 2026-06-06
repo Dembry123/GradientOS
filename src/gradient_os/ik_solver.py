@@ -31,7 +31,6 @@ _BACKEND = build_backend(_BACKEND_NAME)
 _BACKEND_NAME = _BACKEND.name
 
 NUM_JOINTS = _BACKEND.num_joints
-IK_SOLVER = _BACKEND.legacy_solver
 
 # Legacy private names used by older local scripts.
 _urdf_fk_matrix = urdf_fk_matrix
@@ -191,7 +190,6 @@ def solve_ik_path_batch(path_points, initial_joint_angles=None, target_orientati
 __all__ = [
     "BackendUnavailable",
     "END_EFFECTOR_OFFSET",
-    "IK_SOLVER",
     "NUM_JOINTS",
     "get_backend_name",
     "get_fk",

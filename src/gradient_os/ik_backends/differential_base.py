@@ -16,7 +16,6 @@ class DifferentialIKBackendBase(IKBackend):
     """Common pose/differential plumbing for DLS-style and QP-style solvers."""
 
     num_joints = 6
-    legacy_solver = None
 
     def fk_matrix(self, joint_angles):
         return urdf_fk_matrix(joint_angles)

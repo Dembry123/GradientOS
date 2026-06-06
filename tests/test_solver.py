@@ -1,14 +1,14 @@
 import pytest
 import numpy as np
-from ikfast_solver.ikfast_wrapper import IKFastSolver
+from gradient_os.ik_backends.ikfast_backend import IKFastBackend
 
 @pytest.fixture(scope="module")
 def solver():
     """Pytest fixture to initialize the solver once per test module."""
     try:
-        return IKFastSolver()
+        return IKFastBackend()
     except Exception as e:
-        pytest.fail(f"Failed to initialize IKFastSolver: {e}")
+        pytest.fail(f"Failed to initialize IKFast backend: {e}")
 
 def test_solver_initialization(solver):
     """Tests that the solver initializes and reports the correct number of joints."""
@@ -23,15 +23,16 @@ def test_fk_ik_consistency(solver):
     # An arbitrary set of joint angles
     joint_angles = np.deg2rad([10, 20, -30, 40, -50, 60])
     
-    # 1. Use Forward Kinematics to get the end-effector pose
-    fk_translation, fk_rotation = solver.compute_fk(joint_angles)
-    fk_rotation_flat = fk_rotation.flatten()
+    # 1. Use Forward Kinematics to get the public tool-tip pose.
+    fk_matrix = solver.fk_matrix(joint_angles)
+    fk_translation = fk_matrix[:3, 3]
+    fk_rotation_flat = fk_matrix[:3, :3].flatten()
 
     assert fk_translation is not None, "FK calculation failed"
 
     # 2. Use Inverse Kinematics to solve for that pose
     # We use the original angles as the initial guess to get the same solution back
-    ik_solution = solver.solve_ik(fk_translation, fk_rotation_flat, joint_angles)
+    ik_solution = solver.solve_pose(fk_translation, fk_rotation_flat, seed=joint_angles)
 
     assert ik_solution is not None, "IK solution not found for a valid FK pose"
     
@@ -47,14 +48,15 @@ def test_batch_solver(solver):
         np.array([0.1, -0.1, 0.06, 0.02, -0.02, 0.01]),
     ])
 
-    # Convert to Cartesian poses (translation + rotation matrix flattened)
-    poses_batch = np.zeros((len(waypoints), 12))
-    for idx, joint_angles in enumerate(waypoints):
-        trans, rot = solver.compute_fk(joint_angles)
-        poses_batch[idx, :3] = trans
-        poses_batch[idx, 3:] = rot.flatten()
+    # Convert to public Cartesian tool poses.
+    path_points = []
+    target_orientations = []
+    for joint_angles in waypoints:
+        pose = solver.fk_matrix(joint_angles)
+        path_points.append(pose[:3, 3])
+        target_orientations.append(pose[:3, :3])
 
-    path_solutions = solver.solve_ik_path(poses_batch, waypoints[0])
+    path_solutions = solver.solve_path_batch(path_points, waypoints[0], target_orientations=target_orientations)
 
     assert path_solutions is not None, "Batch solver failed to find a solution"
     assert path_solutions.shape == (len(waypoints), solver.num_joints), "Batch solver returned incorrect shape"

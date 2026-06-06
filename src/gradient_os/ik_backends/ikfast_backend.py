@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 
 from .base import IKBackend
@@ -17,24 +19,39 @@ from .common import (
 )
 
 
+def _load_ikfast_pybind():
+    try:
+        return importlib.import_module("ikfast_solver.ikfast_pybind")
+    except ImportError:
+        # Editable builds can leave the extension at top-level site-packages.
+        return importlib.import_module("ikfast_pybind")
+
+
 class IKFastBackend(IKBackend):
     name = "ikfast"
 
     def __init__(self) -> None:
-        from ikfast_solver.ikfast_wrapper import IKFastSolver
-
         try:
-            self.solver = IKFastSolver()
-        except (RuntimeError, OSError) as e:
+            self._ikfast = _load_ikfast_pybind()
+        except (RuntimeError, OSError, ImportError) as e:
             raise BackendUnavailable(f"Failed to load IKFast backend: {e}") from e
-        self.num_joints = self.solver.num_joints
-        self.legacy_solver = self.solver
+        self.num_joints = int(self._ikfast.get_num_joints())
         print(f"[IK Solver] IKFast back-end initialised for {self.num_joints} joints.")
+
+    def _solve_raw_ik(self, translation, rotation_matrix, seed=None):
+        eetrans = np.asarray(translation, dtype=np.float64)
+        eerot = np.asarray(rotation_matrix, dtype=np.float64)
+        if seed is None:
+            return self._ikfast.solve_ik(eetrans, eerot)
+        return self._ikfast.solve_ik(eetrans, eerot, np.asarray(seed, dtype=np.float64))
+
+    def _compute_raw_fk(self, joint_angles):
+        return self._ikfast.compute_fk(np.asarray(joint_angles, dtype=np.float64))
 
     def solve_pose(self, target_position, target_orientation_matrix=None, seed=None):
         target_rotation = as_rotation_matrix(target_orientation_matrix)
         wrist_position = np.asarray(target_position, dtype=float) - target_rotation.dot(END_EFFECTOR_OFFSET)
-        sol = self.solver.solve_ik(wrist_position, target_rotation.flatten(), seed)
+        sol = self._solve_raw_ik(wrist_position, target_rotation.flatten(), seed)
         if sol is None:
             return None
         if seed is not None:
@@ -45,7 +62,7 @@ class IKFastBackend(IKBackend):
         return sol
 
     def fk_matrix(self, joint_angles):
-        wrist_t, wrist_r = self.solver.compute_fk(joint_angles)
+        wrist_t, wrist_r = self._compute_raw_fk(joint_angles)
         wrist_matrix = np.eye(4)
         wrist_matrix[:3, :3] = wrist_r.reshape(3, 3)
         wrist_matrix[:3, 3] = wrist_t
@@ -92,4 +109,4 @@ class IKFastBackend(IKBackend):
             wrist_position = np.array(path_points[i], dtype=float) - target_rotation.dot(END_EFFECTOR_OFFSET)
             poses_batch[i, :3] = wrist_position
             poses_batch[i, 3:] = target_rotation.flatten()
-        return self.solver.solve_ik_path(poses_batch, start_angles_np)
+        return self._ikfast.solve_ik_batch(poses_batch, start_angles_np)

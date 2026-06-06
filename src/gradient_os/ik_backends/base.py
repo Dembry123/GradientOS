@@ -12,7 +12,6 @@ from .common import DifferentialResult
 class IKBackend(ABC):
     name: str
     num_joints: int = 6
-    legacy_solver = None
 
     @abstractmethod
     def fk_matrix(self, joint_angles) -> np.ndarray | None:

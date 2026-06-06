@@ -14,6 +14,8 @@ SOLVER="ikfast"
 TELEOP_MODE="velocity_jog"
 JOG_FREQUENCY="25"
 JOINT_SPEED_LIMIT="800"
+HEBI_BRIDGE=true
+HEBI_LIVE=true
 
 usage() {
   cat <<'USAGE'
@@ -24,6 +26,7 @@ Starts the GradientOS stack without the vision service:
   - controller
   - API
   - web UI
+  - HEBI Mobile I/O bridge
 
 Options:
   --sim=true|false              Use simulator or real servos (default: true)
@@ -35,12 +38,17 @@ Options:
                                 Realtime jog control mode (default: velocity_jog)
   --jog-frequency=N             Jog loop frequency in Hz (default: 25)
   --joint-speed-limit=N         Raw Feetech jog speed register, 1..800 (default: 800)
+  --hebi-bridge=true|false      Start the HEBI Mobile I/O bridge (default: true)
+  --no-hebi-bridge              Shortcut for --hebi-bridge=false
+  --hebi-live=true|false        Send bridge commands to the API instead of dry-run (default: true)
+  --hebi-dry-run                Shortcut for --hebi-live=false
   -h, --help                    Show this help
 
 Examples:
   ./start
   ./start --sim=false --solver=ikfast --joint-speed-limit=400 --jog-frequency=50
   ./start --real --solver=quik --teleop-mode=absolute_pose --joint-speed-limit=300
+  ./start --hebi-dry-run
 USAGE
 }
 
@@ -90,6 +98,18 @@ for arg in "$@"; do
       ;;
     --joint-speed-limit=*)
       JOINT_SPEED_LIMIT="${arg#*=}"
+      ;;
+    --hebi-bridge=*)
+      HEBI_BRIDGE="$(parse_bool "${arg#*=}")"
+      ;;
+    --no-hebi-bridge)
+      HEBI_BRIDGE=false
+      ;;
+    --hebi-live=*)
+      HEBI_LIVE="$(parse_bool "${arg#*=}")"
+      ;;
+    --hebi-dry-run)
+      HEBI_LIVE=false
       ;;
     *)
       echo "[gradient-robotics] ERROR: Unknown option '${arg}'." >&2
@@ -214,17 +234,29 @@ echo "  solver=${SOLVER} (MINI_ARM_SOLVER=${MINI_ARM_SOLVER})"
 echo "  teleop_mode=${GRADIENT_TELEOP_MODE}"
 echo "  jog_frequency=${GRADIENT_JOG_FREQUENCY_HZ} Hz"
 echo "  joint_speed_limit=${GRADIENT_JOG_SERVO_SPEED_REGISTER} raw register"
+echo "  hebi_bridge=${HEBI_BRIDGE}"
+echo "  hebi_live=${HEBI_LIVE}"
 echo "  vision=false"
+
+api_host="http://127.0.0.1:${GRADIENT_API_PORT:-4000}"
 
 launch controller "${controller_cmd[@]}"
 launch api "${VENV_PY}" -m gradient_os.api.main
+if [[ "${HEBI_BRIDGE}" == "true" ]]; then
+  hebi_cmd=("${VENV_PY}" -m gradient_os.teleop.hebi_mobile_io_bridge --api-host "${api_host}")
+  if [[ "${HEBI_LIVE}" == "true" ]]; then
+    hebi_cmd+=(--live)
+  fi
+  launch hebi-bridge "${hebi_cmd[@]}"
+fi
 launch web bash -c 'cd "$1" && exec npm run dev' _ "${WEB_DIR}"
 
 cat <<EOF
 [gradient-robotics] Stack started.
-  API:    http://127.0.0.1:${GRADIENT_API_PORT:-4000}
-  Web UI: http://127.0.0.1:8000
-  Logs:   ${LOG_DIR}
+  API:         ${api_host}
+  Web UI:      http://127.0.0.1:8000
+  HEBI bridge: ${HEBI_BRIDGE}
+  Logs:        ${LOG_DIR}
 
 Press Ctrl-C to stop all services.
 EOF
