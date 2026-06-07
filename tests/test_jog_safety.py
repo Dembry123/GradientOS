@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -98,3 +100,51 @@ def test_jog_thread_rechecks_stop_before_servo_command(monkeypatch):
 
     assert servo_commands == []
     assert command_api.utils.trajectory_state["is_jogging"] is False
+
+
+def test_jog_debug_writes_diagnostic_record_for_ik_failure(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    command_api.utils.trajectory_state["is_jogging"] = True
+    command_api.utils.trajectory_state["is_running"] = False
+    command_api.utils.trajectory_state["jog_deadman"] = True
+    command_api.utils.trajectory_state["jog_debug"] = True
+    command_api.utils.trajectory_state["jog_mode"] = "absolute_pose"
+    command_api.utils.trajectory_state["jog_target_position_m"] = np.array([0.1, 0.0, 0.0])
+    command_api.utils.trajectory_state["jog_target_orientation_matrix"] = np.eye(3)
+    command_api.utils.trajectory_state["last_jog_target_time"] = command_api.time.monotonic()
+    command_api.utils.trajectory_state["last_jog_command_time"] = command_api.time.monotonic()
+    command_api.utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    command_api.utils.trajectory_state["jog_thread"] = None
+
+    measured_q = np.zeros(6)
+    monkeypatch.setattr(
+        command_api.actuators,
+        "get_joint_positions",
+        lambda verbose=False: measured_q,
+    )
+
+    fk_matrix = np.eye(4)
+    monkeypatch.setattr(command_api.ik_solver, "get_fk_matrix", lambda q: fk_matrix)
+
+    def solve_ik(*, target_position, target_orientation_matrix, initial_joint_angles):
+        command_api.utils.trajectory_state["is_jogging"] = False
+        return None
+
+    monkeypatch.setattr(command_api.ik_solver, "solve_ik", solve_ik)
+    monkeypatch.setattr(command_api.time, "sleep", lambda seconds: None)
+
+    command_api._jog_controller_thread()
+    command_api._close_jog_diag_log()
+
+    diag_files = list((tmp_path / "diagnostics" / "jog_motion").glob("jog_motion_*.jsonl"))
+    assert len(diag_files) == 1
+    records = [json.loads(line) for line in diag_files[0].read_text().splitlines()]
+
+    assert records
+    failure = records[-1]
+    assert failure["event"] == "ik_failed"
+    assert failure["target_position_m"] == pytest.approx([0.1, 0.0, 0.0])
+    assert failure["current_position_m"] == pytest.approx([0.0, 0.0, 0.0])
+    assert failure["q_current_rad"] == pytest.approx([0.0] * 6)
+    assert failure["actual_joint_angles_rad"] == pytest.approx([0.0] * 6)
+    assert failure["teleop_mode"] == "absolute_pose"
