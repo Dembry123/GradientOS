@@ -37,7 +37,7 @@ Options:
   --teleop-mode=velocity_jog|absolute_pose
                                 Realtime jog control mode (default: velocity_jog)
   --jog-frequency=N             Jog loop frequency in Hz (default: 25)
-  --joint-speed-limit=N         Raw Feetech jog speed register, 1..800 (default: 800)
+  --joint-speed-limit=N         Raw Feetech jog speed register, 1..4095 (default: 800)
   --hebi-bridge=true|false      Start the HEBI Mobile I/O bridge (default: true)
   --no-hebi-bridge              Shortcut for --hebi-bridge=false
   --hebi-live=true|false        Send bridge commands to the API instead of dry-run (default: true)
@@ -122,8 +122,8 @@ done
 require_positive_int "--jog-frequency" "${JOG_FREQUENCY}"
 require_positive_int "--joint-speed-limit" "${JOINT_SPEED_LIMIT}"
 
-if [[ "${JOINT_SPEED_LIMIT}" -gt 800 ]]; then
-  echo "[gradient-robotics] ERROR: --joint-speed-limit must be in raw Feetech range 1..800." >&2
+if [[ "${JOINT_SPEED_LIMIT}" -gt 4095 ]]; then
+  echo "[gradient-robotics] ERROR: --joint-speed-limit must be in raw Feetech range 1..4095." >&2
   exit 2
 fi
 

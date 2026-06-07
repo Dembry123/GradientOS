@@ -1168,7 +1168,7 @@ def _env_int(name: str, default: int, *, min_value: int | None = None, max_value
 
 
 JOG_CONTROL_FREQUENCY_HZ = _env_int("GRADIENT_JOG_FREQUENCY_HZ", 25, min_value=1)
-JOG_SERVO_SPEED_REGISTER = _env_int("GRADIENT_JOG_SERVO_SPEED_REGISTER", 800, min_value=1, max_value=800)
+JOG_SERVO_SPEED_REGISTER = _env_int("GRADIENT_JOG_SERVO_SPEED_REGISTER", 800, min_value=1)
 JOG_VELOCITY_TIMEOUT_S = 0.5  # If no command received in this time, stop
 MAX_JOG_LINEAR_M_S = 0.2      # Safety cap per-axis
 MAX_JOG_ANGULAR_DEG_S = 180.0 # Safety cap per-axis
