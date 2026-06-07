@@ -1175,7 +1175,6 @@ MAX_JOG_ANGULAR_DEG_S = 180.0 # Safety cap per-axis
 MAX_GRIPPER_JOG_DEG_S = 90.0 # Safety cap for gripper rotation rate
 JOG_LINEAR_HOLD_EPS_M_S = 1e-5
 JOG_ANGULAR_HOLD_EPS_DEG_S = 0.02
-JOG_MAX_JOINT_STEP_RAD = 0.35
 JOG_DIAG_SERVO_SAMPLE_INTERVAL = 5
 VALID_JOG_MODES = {"velocity_jog", "absolute_pose"}
 DEFAULT_JOG_MODE = os.getenv("GRADIENT_TELEOP_MODE", "velocity_jog").strip().lower()
@@ -1303,7 +1302,7 @@ def _update_jog_ik_status(status: str, reason: str = "", **fields):
     if status == "ok":
         success_count += 1
         consecutive_failures = 0
-    elif status in {"ik_failed", "fk_failed", "apply_failed", "joint_jump_rejected", "timeout_zeroed", "stale_target"}:
+    elif status in {"ik_failed", "fk_failed", "apply_failed", "timeout_zeroed", "stale_target"}:
         failure_count += 1
         consecutive_failures += 1
     elif status in {"starting", "stopped"}:
@@ -1598,52 +1597,6 @@ def _jog_controller_thread():
                     print(f"[Jog] q_delta(rad)={np.round(dq, 5)} | lin={np.round(linear_vel,4)} m/s, ang={np.round(angular_deg_s,1)} deg/s, dt={dt:.4f}s")
                 # 6. Command servos to the clamped angles. High speed, zero accel for responsiveness.
                 q_delta = q_clamped - q_current
-                max_abs_step = float(np.max(np.abs(q_delta)))
-                if max_abs_step > JOG_MAX_JOINT_STEP_RAD:
-                    print(
-                        "[Jog] WARNING: Rejecting IK jog step with large joint jump "
-                        f"{max_abs_step:.3f} rad."
-                    )
-                    actual_angles = actuators.get_joint_positions(verbose=False)
-                    _write_jog_diag(
-                        "joint_jump_rejected",
-                        force=True,
-                        current_position_m=current_position,
-                        target_position_m=target_position,
-                        command_linear_m_s=linear_vel,
-                        command_angular_deg_s=angular_deg_s,
-                        q_current_rad=q_current,
-                        q_target_raw_rad=q_target,
-                        q_target_limited_rad=q_clamped,
-                        q_delta_rad=q_delta,
-                        actual_joint_angles_rad=actual_angles,
-                        dt_s=dt,
-                        command_age_s=time_since_last_cmd,
-                        target_age_s=target_age_s,
-                        solve_time_ms=solve_time_ms,
-                        teleop_mode=mode,
-                    )
-                    _update_jog_ik_status(
-                        "joint_jump_rejected",
-                        "IK solution would command an unsafe joint jump",
-                        current_position_m=current_position,
-                        target_position_m=target_position,
-                        command_linear_m_s=linear_vel,
-                        command_angular_deg_s=angular_deg_s,
-                        q_goal_rad=q_target,
-                        q_commanded_rad=q_clamped,
-                        q_delta_rad=q_delta,
-                        dt_s=dt,
-                        command_age_s=time_since_last_cmd,
-                        target_age_s=target_age_s,
-                        solve_time_ms=solve_time_ms,
-                    )
-                    loop_duration = time.monotonic() - loop_start_time
-                    sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                    continue
-
                 if (
                     not utils.trajectory_state.get("is_jogging", False)
                     or not utils.trajectory_state.get("jog_deadman", False)
