@@ -69,7 +69,7 @@ Details:
 ---
 
 ## Internals (Developers)
-* **Implementation:** see `command_api._recording_state` and the three handlers:
+* **Implementation:** see `command_handlers._recording_state` and the three handlers:
   * `handle_plan_trajectory_start()`
   * `handle_record_position()`
   * `handle_end_trajectory(name)`

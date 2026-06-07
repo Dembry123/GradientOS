@@ -126,7 +126,7 @@ arm_controller/
 │                                # Constants populated by _populate_servo_constants()
 │
 ├── trajectory_execution.py      # Trajectory planning and execution
-├── command_api.py               # UDP command handlers
+├── command_handlers.py               # UDP command handlers
 └── pid_tuner.py                 # PID tuning utilities
 ```
 
@@ -380,7 +380,7 @@ class RobotConfig(ABC):
 |------|-------|--------|-------|
 | `actuator_runtime.py` | small | ✅ ACTIVE | App-facing helper layer over active `ActuatorBackend`; synchronizes `utils` state |
 | `trajectory_execution.py` | 1092 | ✅ MIGRATED | Uses `actuator_runtime` / active backend for sync read/write paths |
-| `command_api.py` | 1579 | ✅ MIGRATED | Uses `actuator_runtime` for motion, gripper, jog, and readback paths |
+| `command_handlers.py` | 1579 | ✅ MIGRATED | Uses `actuator_runtime` for motion, gripper, jog, and readback paths |
 | `run_controller.py` | 929 | ✅ MIGRATED | Creates/initializes backend and uses it directly; no serial fallback through old modules |
 | `backends/feetech/protocol.py` | 727 | ✅ NEW | Clean Feetech protocol implementation |
 | `backends/feetech/driver.py` | 835 | ✅ ACTIVE | FeetechBackend class used by runtime Feetech path |
@@ -471,7 +471,7 @@ class RobotConfig(ABC):
 - [x] **2.2.6** Update sync_profiles for diagnostics:
   - Uses `backend.get_sync_profiles()` if available
 
-#### 2.3 command_api.py (Priority: MEDIUM) ✅ COMPLETE
+#### 2.3 command_handlers.py (Priority: MEDIUM) ✅ COMPLETE
 
 - [x] **2.3.1** Audit all `servo_protocol` and `servo_driver` calls
 - [x] **2.3.2** Remove production direct `servo_protocol` and `servo_driver` usage; runtime calls go through `actuator_runtime` / active backend

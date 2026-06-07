@@ -165,7 +165,7 @@ If scripts are not on PATH, run through modules:
 Core:
 
 - `docs/run_controller.md`
-- `docs/command_api.md`
+- `docs/command_handlers.md`
 - `docs/trajectory_execution.md`
 - `docs/utils.md`
 - `docs/ik_solver.md`
@@ -376,7 +376,7 @@ The following diagram illustrates how a command flows through the system, from t
 ```mermaid
 flowchart TD
     A[UDP Command MOVE_LINE etc] --> B[run_controller main loop]
-    B --> C[command_api handler]
+    B --> C[command handlers]
     C --> D[trajectory_execution planner and executor]
     D --> E[ik_solver python wrapper]
     E --> F[ikfast solver]
@@ -396,10 +396,10 @@ flowchart TD
 
 1.  **User:** The user sends a command as a simple string over UDP (e.g., `"MOVE_LINE,0.3,0.1,0.2"`).
 
-2.  **`run_controller.py`:** This is the main entry point of the application. Its `main()` function contains a simple, non-blocking loop that listens for UDP packets. When a packet is received, it is parsed and dispatched to the appropriate handler in the `command_api`.
+2.  **`run_controller.py`:** This is the main entry point of the application. Its `main()` function contains a simple, non-blocking loop that listens for UDP packets. When a packet is received, it is parsed and dispatched to the appropriate function in `command_handlers.py`.
 
 3.  **`arm_controller` Package:** This is the core of the controller logic.
-    *   **`command_api.py`:** Receives the dispatched command. It interprets the command's parameters and orchestrates the other modules to fulfill the request. For a `MOVE_LINE` command, it calls upon the `trajectory_execution` module.
+    *   **`command_handlers.py`:** Receives the dispatched command. It interprets the command's parameters and orchestrates the other modules to fulfill the request. For a `MOVE_LINE` command, it calls upon the `trajectory_execution` module.
     *   **`trajectory_execution.py`:** This module contains the most complex logic. It takes high-level goals (like "move from A to B in a straight line") and performs two key steps:
         1.  **Planning:** It calls the `ik_solver` to plan the entire path, converting the Cartesian trajectory into a dense series of joint angle solutions.
         2.  **Execution:** It starts a background thread (`_closed_loop_executor_thread`) to execute this path, using feedback from the servos to correct for errors in real time.
@@ -434,14 +434,14 @@ The following sequence diagram illustrates how a move is initiated in a backgrou
 sequenceDiagram
     participant Client
     participant MainLoop as run_controller
-    participant CommandAPI as command_api
+    participant CommandHandlers as command_handlers
     participant ExecutorThread as closed_loop_executor
 
     Client->>+MainLoop: MOVE_LINE command
-    MainLoop->>+CommandAPI: handle_move_line
-    CommandAPI->>+ExecutorThread: Start background thread
-    ExecutorThread-->>-CommandAPI: Return immediately
-    CommandAPI-->>-MainLoop: Return immediately
+    MainLoop->>+CommandHandlers: handle_move_line
+    CommandHandlers->>+ExecutorThread: Start background thread
+    ExecutorThread-->>-CommandHandlers: Return immediately
+    CommandHandlers-->>-MainLoop: Return immediately
     MainLoop-->>-Client: Ready for next command
 
     loop For Every Point in Path
@@ -449,15 +449,15 @@ sequenceDiagram
     end
 
     Client->>+MainLoop: STOP command
-    MainLoop->>+CommandAPI: handle_stop_command
-    CommandAPI-->>-MainLoop: Returns immediately
+    MainLoop->>+CommandHandlers: handle_stop_command
+    CommandHandlers-->>-MainLoop: Returns immediately
 
     ExecutorThread->>ExecutorThread: Detect stop flag and exit loop
 ```
 
 ### How it Works
 
-1.  When a `MOVE_LINE` command is received, the `handle_move_line` function in `command_api.py` starts the `_closed_loop_executor_thread`.
+1.  When a `MOVE_LINE` command is received, the `handle_move_line` function in `command_handlers.py` starts the `_closed_loop_executor_thread`.
 2.  Crucially, the handler returns **immediately** after starting the thread. It does not wait for the move to finish. This frees the `MainLoop` in `run_controller.py` to listen for the next command.
 3.  The `ExecutorThread` runs independently in the background, managing the high-frequency (~50 Hz) loop of reading servo feedback, calculating error, and sending corrected position commands.
 4.  If the user sends a `STOP` command, the `MainLoop` is available to receive it instantly. It calls `handle_stop_command`, which sets a global flag (`trajectory_state["should_stop"] = True`).

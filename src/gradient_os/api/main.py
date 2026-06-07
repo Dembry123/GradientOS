@@ -30,10 +30,10 @@ from ..cad.topology_service import (
 
 try:
     from ..arm_controller import utils as controller_utils
-    from ..arm_controller import command_api as controller_command_api
+    from ..arm_controller import command_handlers as controller_command_handlers
 except ImportError:
     controller_utils = None
-    controller_command_api = None
+    controller_command_handlers = None
 
 _REST_POSE_RAD = [0.0, -1.4, 1.5, 0.0, 0.0, 0.0]
 _REST_POSE_COMMAND = ",".join(str(value) for value in _REST_POSE_RAD)
@@ -1062,8 +1062,8 @@ def create_app() -> FastAPI:
     async def trajectory_plan_weld(payload: dict[str, Any]):
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="JSON body required.")
-        if controller_command_api is None:
-            raise HTTPException(status_code=500, detail="Arm controller command API unavailable")
+        if controller_command_handlers is None:
+            raise HTTPException(status_code=500, detail="Arm controller command handlers unavailable")
 
         model_id = payload.get("model_id")
         edge_id = payload.get("edge_id")
@@ -1095,7 +1095,7 @@ def create_app() -> FastAPI:
         preview_name = (
             str(preview_name_raw).strip()
             if isinstance(preview_name_raw, str) and preview_name_raw.strip()
-            else getattr(controller_command_api, "WELD_PREVIEW_NAME", "__weld_preview__")
+            else getattr(controller_command_handlers, "WELD_PREVIEW_NAME", "__weld_preview__")
         )
 
         weld_options = payload.get("options")
@@ -1155,9 +1155,9 @@ def create_app() -> FastAPI:
             live_joints = _get_live_joint_angles_from_controller(timeout=1.0)
             if controller_utils is not None:
                 controller_utils.current_logical_joint_angles_rad = list(live_joints)
-            if hasattr(controller_command_api, "utils"):
-                controller_command_api.utils.current_logical_joint_angles_rad = list(live_joints)
-            return controller_command_api.plan_preview_trajectory_points(
+            if hasattr(controller_command_handlers, "utils"):
+                controller_command_handlers.utils.current_logical_joint_angles_rad = list(live_joints)
+            return controller_command_handlers.plan_preview_trajectory_points(
                 weld_points,
                 preview_name=preview_name,
                 weld_metadata=weld_metadata,
@@ -1186,9 +1186,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Trajectory name is required.")
 
         def _load() -> dict[str, Any] | None:
-            if controller_command_api is None:
-                raise RuntimeError("Arm controller command API unavailable")
-            return controller_command_api._load_trajectory_by_name(name.strip())
+            if controller_command_handlers is None:
+                raise RuntimeError("Arm controller command handlers unavailable")
+            return controller_command_handlers._load_trajectory_by_name(name.strip())
 
         try:
             trajectory = await run_in_threadpool(_load)

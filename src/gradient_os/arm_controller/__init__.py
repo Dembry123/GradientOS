@@ -10,7 +10,7 @@
 # - robot_config.py: Backward-compatible config re-exports
 # - utils.py: Shared utilities and global state (backward-compatible)
 # - actuator_runtime.py: App-facing helpers around the active ActuatorBackend
-# - command_api.py: UDP command handlers
+# - command_handlers.py: UDP command handlers
 # - trajectory_execution.py: Trajectory planning and execution
 #
 # For new robot integrations:
@@ -44,7 +44,7 @@ from . import robot_config
 # Import runtime modules
 from . import actuator_runtime
 from . import utils
-from . import command_api
+from . import command_handlers
 from . import trajectory_execution
 
 __all__ = [
@@ -63,6 +63,6 @@ __all__ = [
     # Runtime and command modules
     'actuator_runtime',
     'utils',
-    'command_api',
+    'command_handlers',
     'trajectory_execution',
 ]

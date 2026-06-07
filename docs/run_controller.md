@@ -19,7 +19,7 @@ The logic within the `main()` function is designed to be a simple, robust dispat
 2.  **Command Loop:** The `while True:` loop continuously waits for UDP packets.
 3.  **Timeout:** A short socket timeout (0.1s) is used. This allows the loop to run in a non-blocking fashion, which is essential for handling the `CALIBRATE` command's streaming response and for enabling a graceful shutdown via `KeyboardInterrupt` (Ctrl+C).
 4.  **Command Parsing:** When a message is received, it's parsed into a command and its arguments.
-5.  **Dispatching:** A series of `if/elif` statements checks the command and calls the appropriate handler function from the `command_api.py` module. This keeps the main loop clean and delegates all complex logic to the API module.
+5.  **Dispatching:** A series of `if/elif` statements checks the command and calls the appropriate handler function from the `command_handlers.py` module. This keeps the main loop clean and delegates command-specific logic to the handler module.
 6.  **Graceful Shutdown:** The entire process is wrapped in `try...finally` blocks to ensure that if the script is stopped for any reason (e.g., Ctrl+C), the UDP socket is closed and the serial port is properly released. 
 
 ### Selecting the Serial Port

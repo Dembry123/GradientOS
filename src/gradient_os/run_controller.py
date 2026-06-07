@@ -27,7 +27,7 @@ try:
     
     from .arm_controller import (
         actuator_runtime as actuators,
-        command_api,
+        command_handlers,
         utils,
         robot_config,
     )
@@ -52,6 +52,28 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _validate_real_servo_startup(selected_robot: RobotConfig, active_backend) -> bool:
+    """Return True only when every configured real servo was detected."""
+    required_ids = {int(actuator_id) for actuator_id in selected_robot.actuator_ids}
+    try:
+        present_ids = {int(actuator_id) for actuator_id in active_backend.get_present_actuator_ids()}
+    except Exception as exc:
+        print(f"[Controller] ERROR: Could not read detected actuator IDs: {exc}")
+        return False
+
+    missing_ids = sorted(required_ids - present_ids)
+    print(f"[Controller] Detected real servos: {sorted(present_ids)}")
+    if not missing_ids:
+        print("[Controller] All configured real servos detected.")
+        return True
+
+    print(
+        "[Controller] ERROR: Missing configured real servos: "
+        f"{missing_ids}. Expected {sorted(required_ids)}."
+    )
+    return False
+
+
 def main():
     """
     Main entry point for the robot controller.
@@ -63,7 +85,7 @@ def main():
     4. Performs an initial read of servo positions to synchronize the internal state.
     5. Enters an infinite loop to listen for UDP commands.
     6. Parses incoming commands and dispatches them to the appropriate handler
-       in the `command_api` module.
+       in the `command_handlers` module.
     7. Manages a simple calibration mode for streaming servo data.
     8. Ensures a graceful shutdown of the serial port on exit.
     """
@@ -214,6 +236,23 @@ Examples:
             print("[Controller] EtherCAT RTCore backend selected; skipping legacy serial init (motion unavailable).")
         else:
             print("[Controller] Backend initialization failed; motion is unavailable until the backend is healthy.")
+
+    if not args.sim and servo_backend not in {"simulation", "ethercat_rtcore"}:
+        if not backend_ready or active_backend is None or not active_backend.is_initialized:
+            print("[Controller] ERROR: Real servo backend is not ready; refusing to start stack.")
+            if active_backend is not None:
+                try:
+                    active_backend.shutdown()
+                except Exception:
+                    pass
+            sys.exit(1)
+        if not _validate_real_servo_startup(selected_robot, active_backend):
+            print("[Controller] ERROR: Real servo startup validation failed; refusing to start stack.")
+            try:
+                active_backend.shutdown()
+            except Exception:
+                pass
+            sys.exit(1)
 
     # ==========================================================================
     # Backend Runtime Initialization
@@ -378,7 +417,7 @@ Examples:
 
                 # --- High-Priority Commands ---
                 if message.upper() == "STOP":
-                    command_api.handle_stop_command()
+                    command_handlers.handle_stop_command()
                     try:
                         sock.sendto("ACK,STOP".encode("utf-8"), addr)
                     except Exception:
@@ -386,7 +425,7 @@ Examples:
                     continue
 
                 if message.upper() == _TEST_SHUTDOWN_COMMAND and _env_flag(_TEST_SHUTDOWN_ENV):
-                    command_api.handle_stop_command()
+                    command_handlers.handle_stop_command()
                     try:
                         sock.sendto("ACK,SHUTDOWN".encode("utf-8"), addr)
                     except Exception:
@@ -511,10 +550,10 @@ Examples:
                     sock.sendto(reply.encode("utf-8"), addr)
 
                 elif command == "GET_POSITION":
-                    command_api.handle_get_position(sock, addr)
+                    command_handlers.handle_get_position(sock, addr)
 
                 elif command == "GET_ORIENTATION":
-                    command_api.handle_get_orientation(sock, addr)
+                    command_handlers.handle_get_orientation(sock, addr)
 
                 elif command == "GET_STATUS":
                     reply = f"STATUS,gripper_present,{utils.gripper_present}"
@@ -540,7 +579,7 @@ Examples:
                 elif command == "JOG_START":
                     try:
                         mode = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
-                        command_api.handle_jog_start(mode)
+                        command_handlers.handle_jog_start(mode)
                         try:
                             sock.sendto("ACK,JOG_START".encode("utf-8"), addr)
                         except Exception:
@@ -550,7 +589,7 @@ Examples:
 
                 elif command == "JOG_STOP":
                     try:
-                        command_api.handle_jog_stop()
+                        command_handlers.handle_jog_stop()
                         try:
                             sock.sendto("ACK,JOG_STOP".encode("utf-8"), addr)
                         except Exception:
@@ -565,7 +604,7 @@ Examples:
                             print("[Controller] Error: SET_JOG_VELOCITY requires 6 values.")
                         else:
                             vx, vy, vz, v_roll, v_pitch, v_yaw = map(float, parts[1:7])
-                            command_api.handle_set_jog_velocity(vx, vy, vz, v_roll, v_pitch, v_yaw)
+                            command_handlers.handle_set_jog_velocity(vx, vy, vz, v_roll, v_pitch, v_yaw)
                     except ValueError:
                         print("[Controller] Error: Non-numeric value in SET_JOG_VELOCITY.")
 
@@ -574,7 +613,7 @@ Examples:
                         if len(parts) < 2:
                             print("[Controller] Error: SET_JOG_MODE requires a mode.")
                         else:
-                            command_api.handle_set_jog_mode(parts[1])
+                            command_handlers.handle_set_jog_mode(parts[1])
                     except Exception as e:
                         print(f"[Controller] Error parsing SET_JOG_MODE: {e}")
 
@@ -584,7 +623,7 @@ Examples:
                             print("[Controller] Error: SET_JOG_TARGET_POSE requires x,y,z,qx,qy,qz,qw.")
                         else:
                             x, y, z, qx, qy, qz, qw = map(float, parts[1:8])
-                            command_api.handle_set_jog_target_pose(x, y, z, qx, qy, qz, qw)
+                            command_handlers.handle_set_jog_target_pose(x, y, z, qx, qy, qz, qw)
                     except ValueError:
                         print("[Controller] Error: Non-numeric value in SET_JOG_TARGET_POSE.")
                     except Exception as e:
@@ -593,21 +632,21 @@ Examples:
                 elif command == "SET_GRIPPER_JOG_VELOCITY":
                     try:
                         rate = float(parts[1]) if len(parts) > 1 else 0.0
-                        command_api.handle_set_gripper_jog_velocity(rate)
+                        command_handlers.handle_set_gripper_jog_velocity(rate)
                     except ValueError:
                         print("[Controller] Error: Non-numeric value in SET_GRIPPER_JOG_VELOCITY.")
 
                 elif command == "SET_JOG_DEADMAN":
                     try:
                         flag = parts[1].strip().lower() in {"true","1","yes","on","hold"}
-                        command_api.handle_set_jog_deadman(flag)
+                        command_handlers.handle_set_jog_deadman(flag)
                     except Exception:
                         print("[Controller] Error parsing SET_JOG_DEADMAN.")
 
                 elif command == "SET_JOG_DEBUG":
                     try:
                         flag = parts[1].strip().lower() in {"true","1","yes","on"}
-                        command_api.handle_set_jog_debug(flag)
+                        command_handlers.handle_set_jog_debug(flag)
                     except Exception:
                         print("[Controller] Error parsing SET_JOG_DEBUG.")
 
@@ -624,7 +663,7 @@ Examples:
                         print("[Controller] WARNING: Failed to refresh actuator limits.")
 
                 elif command == "WAIT_FOR_IDLE":
-                    command_api.handle_wait_for_idle()
+                    command_handlers.handle_wait_for_idle()
                     try:
                         sock.sendto("ACK,WAIT_FOR_IDLE".encode("utf-8"), addr)
                     except Exception:
@@ -638,12 +677,12 @@ Examples:
                         angle_deg = float(parts[1])
                         speed = int(parts[2]) if len(parts) > 2 else 100
                         accel = int(parts[3]) if len(parts) > 3 else 0
-                        command_api.handle_set_gripper_state(angle_deg, speed, accel)
+                        command_handlers.handle_set_gripper_state(angle_deg, speed, accel)
                     except (ValueError, IndexError):
                         print("[Controller] Error: Invalid SET_GRIPPER command. Use 'SET_GRIPPER,angle_deg,[speed],[accel]'.")
 
                 elif command == "GET_GRIPPER_STATE":
-                    command_api.handle_get_gripper_state(sock, addr)
+                    command_handlers.handle_get_gripper_state(sock, addr)
 
                 # ------------------------------------------------------------------
                 # NEW: PID tuning commands (advanced)
@@ -655,7 +694,7 @@ Examples:
                         freq = int(float(parts[3])) if len(parts) > 3 else 200
                         dur = float(parts[4]) if len(parts) > 4 else 3.0
                         move_zero = (parts[5].strip().lower() in {"true","1","yes","on"}) if len(parts) > 5 else True
-                        command_api.handle_tune_pid_joint(j, amplitude_deg=amp, frequency_hz=freq, duration_s=dur, move_to_zero_first=move_zero)
+                        command_handlers.handle_tune_pid_joint(j, amplitude_deg=amp, frequency_hz=freq, duration_s=dur, move_to_zero_first=move_zero)
                         sock.sendto("ACK,TUNE_PID_JOINT".encode("utf-8"), addr)
                     except Exception as e:
                         print(f"[Controller] Error: TUNE_PID_JOINT malformed: {e}")
@@ -667,7 +706,7 @@ Examples:
                         freq = int(float(parts[2])) if len(parts) > 2 else 200
                         dur = float(parts[3]) if len(parts) > 3 else 3.0
                         move_zero_each = (parts[4].strip().lower() in {"true","1","yes","on"}) if len(parts) > 4 else True
-                        command_api.handle_tune_pid_all(amplitude_deg=amp, frequency_hz=freq, duration_s=dur, move_to_zero_first_each=move_zero_each)
+                        command_handlers.handle_tune_pid_all(amplitude_deg=amp, frequency_hz=freq, duration_s=dur, move_to_zero_first_each=move_zero_each)
                         sock.sendto("ACK,TUNE_PID_ALL".encode("utf-8"), addr)
                     except Exception as e:
                         print(f"[Controller] Error: TUNE_PID_ALL malformed: {e}")
@@ -677,7 +716,7 @@ Examples:
                 # NEW: Recording commands (trajectory recorder)
                 # ------------------------------------------------------------------
                 elif command == "PLAN_TRAJECTORY":
-                    command_api.handle_plan_trajectory_start()
+                    command_handlers.handle_plan_trajectory_start()
 
                 elif command == "PLAN_TRAJECTORY_POINTS":
                     try:
@@ -689,7 +728,7 @@ Examples:
                             (coords[i], coords[i + 1], coords[i + 2])
                             for i in range(0, len(coords), 3)
                         ]
-                        command_api.handle_plan_trajectory_points(points, sock, addr)
+                        command_handlers.handle_plan_trajectory_points(points, sock, addr)
                     except ValueError as e:
                         print(f"[Controller] Error: Invalid PLAN_TRAJECTORY_POINTS command: {e}")
                         try:
@@ -700,19 +739,19 @@ Examples:
                         print(f"[Controller] Error while handling PLAN_TRAJECTORY_POINTS: {e}")
 
                 elif command == "REC_POS":
-                    command_api.handle_record_position()
+                    command_handlers.handle_record_position()
 
                 elif command == "END_TRAJECTORY":
                     try:
                         traj_name = parts[1].strip()
-                        command_api.handle_end_trajectory(traj_name)
+                        command_handlers.handle_end_trajectory(traj_name)
                     except IndexError:
                         print("[Controller] Error: Invalid END_TRAJECTORY command. Use 'END_TRAJECTORY,name'.")
 
                 elif command == "GET_TRAJECTORIES":
                     try:
-                        # Use the canonical recorded trajectories dir from command_api (root-level)
-                        traj_dir = command_api.RECORDED_TRAJ_DIR
+                        # Use the canonical recorded trajectories dir from command_handlers (root-level)
+                        traj_dir = command_handlers.RECORDED_TRAJ_DIR
 
                         if not os.path.isdir(traj_dir):
                             print(f"[Controller] Trajectory directory not found: {traj_dir}")
@@ -735,7 +774,7 @@ Examples:
                 elif command == "TRANSLATE":
                     try:
                         dx, dy, dz = map(float, parts[1:4])
-                        command_api.handle_translate_command(dx, dy, dz)
+                        command_handlers.handle_translate_command(dx, dy, dz)
                     except (ValueError, IndexError):
                         print("[Controller] Error: Invalid TRANSLATE command. Use 'TRANSLATE,dx,dy,dz'.")
 
@@ -743,14 +782,14 @@ Examples:
                     try:
                         axis = parts[1].lower()
                         angle_deg = float(parts[2])
-                        command_api.handle_rotate_command(axis, angle_deg)
+                        command_handlers.handle_rotate_command(axis, angle_deg)
                     except (ValueError, IndexError, KeyError):
                         print("[Controller] Error: Invalid ROTATE command. Use 'ROTATE,axis,degrees'.")
 
                 elif command == "SET_ORIENTATION":
                     try:
                         roll, pitch, yaw = map(float, parts[1:4])
-                        command_api.handle_set_orientation_command(roll, pitch, yaw)
+                        command_handlers.handle_set_orientation_command(roll, pitch, yaw)
                     except (ValueError, IndexError):
                         print("[Controller] Error: Invalid SET_ORIENTATION command. Use 'SET_ORIENTATION,roll,pitch,yaw'.")
 
@@ -763,7 +802,7 @@ Examples:
                         closed_loop = False
                         if len(parts) > 6 and parts[6].strip() != "":
                             closed_loop = parts[6].strip().lower() in {"true", "1", "yes", "closed", "on"}
-                        command_api.handle_move_line(x, y, z, v, a, closed_loop)
+                        command_handlers.handle_move_line(x, y, z, v, a, closed_loop)
                     except (ValueError, IndexError):
                         print("[Controller] Error: Invalid MOVE_LINE command. Use 'MOVE_LINE,x,y,z,[v],[a],[closed_loop]'.")
 
@@ -795,7 +834,7 @@ Examples:
                     closed_loop = False
                     if len(parts) > 5 and parts[5].strip() != "":
                         closed_loop = parts[5].strip().lower() in {"true", "1", "yes", "closed", "on"}
-                    command_api.handle_move_line_relative(dx, dy, dz, speed_multiplier, closed_loop)
+                    command_handlers.handle_move_line_relative(dx, dy, dz, speed_multiplier, closed_loop)
 
                 elif command == "MOVE_PROFILED":
                     print("[Controller] WARNING: The 'MOVE_PROFILED' command is deprecated. Please use 'MOVE_LINE' for clearer intent.")
@@ -803,7 +842,7 @@ Examples:
                         x, y, z = map(float, parts[1:4])
                         v = float(parts[4]) if len(parts) > 4 else utils.DEFAULT_PROFILE_VELOCITY
                         a = float(parts[5]) if len(parts) > 5 else utils.DEFAULT_PROFILE_ACCELERATION
-                        command_api.handle_move_profiled(x, y, z, v, a)
+                        command_handlers.handle_move_profiled(x, y, z, v, a)
                     except (ValueError, IndexError):
                         print("[Controller] Error: Invalid MOVE_PROFILED command. Use 'MOVE_PROFILED,x,y,z,[v],[a]'.")
 
@@ -812,7 +851,7 @@ Examples:
                     try:
                         dx, dy, dz = map(float, parts[1:4])
                         speed = float(parts[4]) if len(parts) > 4 else 1.0
-                        command_api.handle_move_profiled_relative(dx, dy, dz, speed)
+                        command_handlers.handle_move_profiled_relative(dx, dy, dz, speed)
                     except (ValueError, IndexError):
                         print("[Controller] Error: Invalid MOVE_PROFILED_RELATIVE command. Use '...,dx,dy,dz,[speed]'.")
 
@@ -821,7 +860,7 @@ Examples:
                         name = parts[1].lower().strip()
                         cache = parts[2].lower().strip() in ['true', '1', 'yes'] if len(parts) > 2 else False
                         loop_override = parts[3].lower().strip() in ['true', '1', 'yes'] if len(parts) > 3 else None
-                        command_api.handle_run_trajectory(name, use_cache=cache, loop_override=loop_override)
+                        command_handlers.handle_run_trajectory(name, use_cache=cache, loop_override=loop_override)
                     except IndexError:
                         print("[Controller] Error: Invalid RUN_TRAJECTORY command. Use 'RUN_TRAJECTORY,name,[use_cache],[loop_override]'.")
 
@@ -1018,7 +1057,7 @@ Examples:
 
                             actuators.set_joint_positions(arm_angles, speed, accel)
                             if gripper_rad is not None:
-                                command_api.handle_set_gripper_state(np.rad2deg(gripper_rad), speed, accel)
+                                command_handlers.handle_set_gripper_state(np.rad2deg(gripper_rad), speed, accel)
                     except ValueError:
                         print(f"[Controller] Error: Could not parse joint angle command '{message}'")
 

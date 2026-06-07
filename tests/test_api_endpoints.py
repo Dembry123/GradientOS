@@ -72,7 +72,7 @@ def patch_send(monkeypatch):
             return True, ""
         return responses.get(command, (False, f"unexpected {command}"))
 
-    class DummyCommandApi:
+    class DummyCommandHandlers:
         sample_traj = {
             "description": "Sample trajectory",
             "loop": False,
@@ -87,7 +87,7 @@ def patch_send(monkeypatch):
         @staticmethod
         def _load_trajectory_by_name(name):
             if name in {"alpha", "beta", "__planner_preview__"}:
-                return DummyCommandApi.sample_traj
+                return DummyCommandHandlers.sample_traj
             return None
 
         @staticmethod
@@ -98,7 +98,7 @@ def patch_send(monkeypatch):
             body["name"] = preview_name
             body["waypoints"] = points
             body["cartesian_path"] = points
-            body["trajectory"] = dict(DummyCommandApi.sample_traj)
+            body["trajectory"] = dict(DummyCommandHandlers.sample_traj)
             if weld_metadata:
                 body["trajectory"]["weld"] = weld_metadata
             if sections:
@@ -144,7 +144,7 @@ def patch_send(monkeypatch):
         "gradient_os.api.main._probe_controller", lambda timeout=0.5: (True, "ok")
     )
     monkeypatch.setattr(
-        "gradient_os.api.main.controller_command_api", DummyCommandApi
+        "gradient_os.api.main.controller_command_handlers", DummyCommandHandlers
     )
     monkeypatch.setattr(
         "gradient_os.api.main.topology_service", DummyTopologyService()

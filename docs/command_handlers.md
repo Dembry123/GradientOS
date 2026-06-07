@@ -1,4 +1,4 @@
-## `command_api.py` - UDP Command Reference
+## `command_handlers.py` - UDP Command Reference
 
 **Primary Responsibility:** To provide a clear and robust API for controlling the robot arm via UDP commands. This module acts as the bridge between the network-facing `run_controller.py` and the internal motion logic in other modules.
 

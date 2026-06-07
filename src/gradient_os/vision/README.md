@@ -443,7 +443,7 @@ The vision module can be integrated with the arm controller for applications lik
 Example integration:
 
 ```python
-from gradient_os.arm_controller import command_api
+from gradient_os.arm_controller import command_handlers
 from gradient_os.vision import PiCameraDriver, ImageProcessor
 
 # Initialize systems
@@ -460,7 +460,7 @@ objects = processor.detect_objects_by_color(image, lower_bound, upper_bound)
 if objects:
     target = processor.find_largest_object(objects)
     # Move arm to object position...
-    command_api.move_to_position(target['center_x'], target['center_y'])
+    command_handlers.move_to_position(target['center_x'], target['center_y'])
 
 camera.close()
 ```
