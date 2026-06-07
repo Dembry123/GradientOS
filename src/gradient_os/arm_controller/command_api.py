@@ -1670,6 +1670,23 @@ def _jog_controller_thread():
             # If IK fails, we don't command anything and just try again next cycle.
             # This can happen if the target is unreachable.
             print("[Jog] WARNING: IK solution not found for step.")
+            actual_angles = None
+            if utils.trajectory_state.get("jog_debug", False):
+                actual_angles = actuators.get_joint_positions(verbose=False)
+            _write_jog_diag(
+                "ik_failed",
+                current_position_m=current_position,
+                target_position_m=target_position,
+                command_linear_m_s=linear_vel,
+                command_angular_deg_s=angular_deg_s,
+                q_current_rad=q_current,
+                actual_joint_angles_rad=actual_angles,
+                dt_s=dt,
+                command_age_s=time_since_last_cmd,
+                target_age_s=target_age_s,
+                solve_time_ms=solve_time_ms,
+                teleop_mode=mode,
+            )
             _update_jog_ik_status(
                 "ik_failed",
                 "IK solution not found for jog step",

@@ -27,6 +27,51 @@ class TestEndToEnd(unittest.TestCase):
             "thread": None
         }
 
+    def _controller_target_ip(self) -> str:
+        target_ip = utils.PI_IP
+        if target_ip in {None, "", "0.0.0.0"}:
+            return "127.0.0.1"
+        return target_ip
+
+    def _send_udp_command(self, command: str, target_ip: str, timeout: float = 1.0) -> bytes | None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            target_port = utils.UDP_PORT or 3000
+            try:
+                sock.sendto(command.encode("utf-8"), (target_ip, target_port))
+            except OSError as exc:
+                if getattr(exc, "errno", None) in {errno.EHOSTUNREACH, errno.EADDRNOTAVAIL, errno.ENETUNREACH}:
+                    target_ip = "127.0.0.1"
+                    sock.sendto(command.encode("utf-8"), (target_ip, target_port))
+                else:
+                    raise
+
+            try:
+                response, _ = sock.recvfrom(1024)
+                return response
+            except socket.timeout:
+                return None
+
+    def _cleanup_controller(self, controller_thread: threading.Thread | None, target_ip: str) -> list[str]:
+        errors = []
+        try:
+            self._send_udp_command("__TEST_SHUTDOWN__", target_ip, timeout=1.0)
+        except OSError as exc:
+            errors.append(f"Failed to send controller shutdown command: {exc}")
+
+        trajectory_thread = utils.trajectory_state.get("thread")
+        if trajectory_thread is not None:
+            trajectory_thread.join(timeout=1)
+            if trajectory_thread.is_alive():
+                errors.append("Trajectory thread did not stop after controller shutdown.")
+
+        if controller_thread is not None:
+            controller_thread.join(timeout=2)
+            if controller_thread.is_alive():
+                errors.append("Controller thread did not stop after test shutdown command.")
+
+        return errors
+
     @patch('gradient_os.ik_solver.solve_ik_path_batch')
     def test_move_line_command_to_serial_output(self,
                                                 mock_solve_ik: MagicMock) -> None:
@@ -52,60 +97,56 @@ class TestEndToEnd(unittest.TestCase):
         sync_write_patcher.start()
         self.addCleanup(sync_write_patcher.stop)
 
-        with patch.object(sys, "argv", ["gradient-controller", "--sim"]):
-            controller_thread = threading.Thread(target=run_controller_main, daemon=True)
-            controller_thread.start()
-            time.sleep(1.5) # Give the server time to start
+        controller_thread = None
+        target_ip = self._controller_target_ip()
+        env_patcher = patch.dict(os.environ, {"GRADIENT_ALLOW_CONTROLLER_SHUTDOWN": "1"})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
 
-        # 3. Send a MOVE_LINE command via UDP
-        target_ip = utils.PI_IP
-        if target_ip == "0.0.0.0":
-            target_ip = "127.0.0.1"
-        command = "MOVE_LINE,0.1,0.2,0.3,0.1,0.05"
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(1.0)
-            sock.sendto(b"GET_STATUS", (target_ip, utils.UDP_PORT))
-            try:
-                _resp, _ = sock.recvfrom(1024)
-            except socket.timeout:
+        cleanup_errors: list[str] = []
+        try:
+            with patch.object(sys, "argv", ["gradient-controller", "--sim"]):
+                controller_thread = threading.Thread(target=run_controller_main, daemon=True)
+                controller_thread.start()
+                time.sleep(1.5) # Give the server time to start
+
+            # 3. Send a MOVE_LINE command via UDP
+            status = self._send_udp_command("GET_STATUS", target_ip)
+            if status is None:
                 self.fail("Controller did not respond to GET_STATUS")
-            try:
-                sock.sendto(command.encode('utf-8'), (target_ip, utils.UDP_PORT))
-            except OSError as exc:
-                # Some hosts (e.g., macOS) cannot route to 0.0.0.0; fall back to loopback.
-                if getattr(exc, "errno", None) in {errno.EHOSTUNREACH, errno.EADDRNOTAVAIL, errno.ENETUNREACH}:
-                    target_ip = "127.0.0.1"
+
+            command = "MOVE_LINE,0.1,0.2,0.3,0.1,0.05"
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                try:
                     sock.sendto(command.encode('utf-8'), (target_ip, utils.UDP_PORT))
-                else:
-                    raise
-            for _ in range(10):
-                if sync_write_calls:
-                    break
-                time.sleep(0.2)
+                except OSError as exc:
+                    # Some hosts (e.g., macOS) cannot route to 0.0.0.0; fall back to loopback.
+                    if getattr(exc, "errno", None) in {errno.EHOSTUNREACH, errno.EADDRNOTAVAIL, errno.ENETUNREACH}:
+                        target_ip = "127.0.0.1"
+                        sock.sendto(command.encode('utf-8'), (target_ip, utils.UDP_PORT))
+                    else:
+                        raise
+                for _ in range(10):
+                    if sync_write_calls:
+                        break
+                    time.sleep(0.2)
 
-        # 4. Assert that the controller attempted backend sync writes with actuator commands
-        self.assertTrue(sync_write_calls, "Controller never issued a backend sync write.")
-        sent_commands = sync_write_calls[0]
+            # 4. Assert that the controller attempted backend sync writes with actuator commands
+            self.assertTrue(sync_write_calls, "Controller never issued a backend sync write.")
+            sent_commands = sync_write_calls[0]
 
-        commanded_ids = {cmd[0] for cmd in sent_commands}
-        expected_ids = set(utils.SERVO_IDS[:-1])  # Gripper may not be commanded in every move
-        expected_sim_indices = set(range(utils.NUM_LOGICAL_JOINTS))
-        self.assertTrue(
-            expected_ids.issubset(commanded_ids) or expected_sim_indices.issubset(commanded_ids),
-            "Missing arm actuator commands in backend sync write.",
-        )
+            commanded_ids = {cmd[0] for cmd in sent_commands}
+            expected_ids = set(utils.SERVO_IDS[:-1])  # Gripper may not be commanded in every move
+            expected_sim_indices = set(range(utils.NUM_LOGICAL_JOINTS))
+            self.assertTrue(
+                expected_ids.issubset(commanded_ids) or expected_sim_indices.issubset(commanded_ids),
+                "Missing arm actuator commands in backend sync write.",
+            )
+        finally:
+            cleanup_errors = self._cleanup_controller(controller_thread, target_ip)
 
-        # 6. Stop the controller
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.sendto("STOP".encode('utf-8'), (target_ip, utils.UDP_PORT))
-        
-        # Give the thread time to shut down
-        time.sleep(0.2)
-        # Explicitly wait for the trajectory thread to finish
-        if utils.trajectory_state["thread"] is not None:
-             utils.trajectory_state["thread"].join(timeout=1)
-
-        # Since controller_thread is a daemon, it will exit automatically.
+        if cleanup_errors:
+            self.fail(" ".join(cleanup_errors))
 
 
 if __name__ == '__main__':

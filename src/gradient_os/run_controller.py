@@ -44,6 +44,12 @@ except ImportError as e:
 
 # Get available servo backends from the registry
 AVAILABLE_SERVO_BACKENDS = backend_registry.list_available_backends()
+_TEST_SHUTDOWN_COMMAND = "__TEST_SHUTDOWN__"
+_TEST_SHUTDOWN_ENV = "GRADIENT_ALLOW_CONTROLLER_SHUTDOWN"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def main():
@@ -378,6 +384,14 @@ Examples:
                     except Exception:
                         pass
                     continue
+
+                if message.upper() == _TEST_SHUTDOWN_COMMAND and _env_flag(_TEST_SHUTDOWN_ENV):
+                    command_api.handle_stop_command()
+                    try:
+                        sock.sendto("ACK,SHUTDOWN".encode("utf-8"), addr)
+                    except Exception:
+                        pass
+                    break
 
                 # --- Command Parsing ---
                 parts = message.split(',')
