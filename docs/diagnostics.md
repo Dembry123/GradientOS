@@ -8,12 +8,20 @@ The primary way to capture performance data is through live logging. When enable
 
 ### How to Enable
 
-To enable live logging, you must set the `MINI_ARM_IK_LOG` environment variable to `1` before starting the controller.
+When using the full stack launcher, enable diagnostic logging with:
+
+```bash
+./start --diagnostic-logging
+```
+
+That sets `MINI_ARM_IK_LOG=1` for the controller, enables realtime jog JSONL logging, and passes `--diagnostic-log` to the HEBI Mobile I/O bridge when the bridge is started by `./start`.
+
+If you are running the controller by itself, set the `MINI_ARM_IK_LOG` environment variable to `1` before starting the controller.
 
 ```bash
 # From your shell in the project root
 export MINI_ARM_IK_LOG=1
-python3 run_controller.py
+python -m gradient_os.run_controller
 ```
 
 Now, any relevant move command you send to the running controller will create a new diagnostic session.
@@ -88,4 +96,4 @@ python3 diagnostics/ik_path_diagnostics.py --json my_test_path.json
 
 ### Output
 
-The standalone script generates its output in the `diagnostics/ik_path/` directory. It produces a similar set of files (`ik_log_<timestamp>.csv`, `ik_angles_<timestamp>.png`, `ik_error_<timestamp>.png`) that allow you to analyze a specific path in isolation. 
+The standalone script generates its output in the `diagnostics/ik_path/` directory. It produces a similar set of files (`ik_log_<timestamp>.csv`, `ik_angles_<timestamp>.png`, `ik_error_<timestamp>.png`) that allow you to analyze a specific path in isolation.

@@ -110,10 +110,11 @@ For local development, the `./start` launcher starts controller, API, web UI, an
 ./start --sim=true --solver=ikfast --teleop-mode=velocity_jog --joint-speed-limit=800 --jog-frequency=25
 ./start --sim=true --solver=quik --teleop-mode=absolute_pose --joint-speed-limit=300 --jog-frequency=30
 ./start --real --solver=dls --teleop-mode=absolute_pose --joint-speed-limit=200
+./start --real --teleop-mode=absolute_pose --diagnostic-logging
 ./start --hebi-dry-run
 ```
 
-Solver choices are `ikfast`, `quik`, `trac`, `dls`, and `qp`. `trac` requires `trac_ik_python`; if that native dependency is missing the backend fails clearly at startup. See `docs/ik_solver.md` for solver setup and benchmarking.
+Solver choices are `ikfast`, `quik`, `trac`, `dls`, and `qp`. `trac` requires `trac_ik_python`; if that native dependency is missing the backend fails clearly at startup. Use `--diagnostic-logging` to enable controller IK/trajectory logs, controller realtime jog JSONL logs, and HEBI bridge phone/target JSONL logs. See `docs/ik_solver.md` for solver setup and benchmarking.
 
 ## First-Run Operator Workflow (Web UI)
 

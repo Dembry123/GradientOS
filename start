@@ -16,6 +16,7 @@ JOG_FREQUENCY="25"
 JOINT_SPEED_LIMIT="800"
 HEBI_BRIDGE=true
 HEBI_LIVE=true
+DIAGNOSTIC_LOGGING=false
 
 usage() {
   cat <<'USAGE'
@@ -42,6 +43,10 @@ Options:
   --no-hebi-bridge              Shortcut for --hebi-bridge=false
   --hebi-live=true|false        Send bridge commands to the API instead of dry-run (default: true)
   --hebi-dry-run                Shortcut for --hebi-live=false
+  --diagnostic-logging=true|false
+                                Enable controller and bridge diagnostic logs (default: false)
+  --diagnostics                 Shortcut for --diagnostic-logging=true
+  --no-diagnostics              Shortcut for --diagnostic-logging=false
   -h, --help                    Show this help
 
 Examples:
@@ -62,6 +67,8 @@ parse_bool() {
       ;;
   esac
 }
+
+DIAGNOSTIC_LOGGING="$(parse_bool "${GRADIENT_DIAGNOSTIC_LOGGING:-${GRADIENT_DIAGNOSTICS:-${GRADIENT_JOG_DEBUG_LOG:-${MINI_ARM_IK_LOG:-0}}}}")"
 
 require_positive_int() {
   local name="$1"
@@ -110,6 +117,15 @@ for arg in "$@"; do
       ;;
     --hebi-dry-run)
       HEBI_LIVE=false
+      ;;
+    --diagnostics|--diagnostic-logging|--diagnostic-log)
+      DIAGNOSTIC_LOGGING=true
+      ;;
+    --no-diagnostics|--no-diagnostic-logging|--no-diagnostic-log)
+      DIAGNOSTIC_LOGGING=false
+      ;;
+    --diagnostics=*|--diagnostic-logging=*|--diagnostic-log=*)
+      DIAGNOSTIC_LOGGING="$(parse_bool "${arg#*=}")"
       ;;
     *)
       echo "[gradient-robotics] ERROR: Unknown option '${arg}'." >&2
@@ -185,6 +201,9 @@ export MINI_ARM_SOLVER="${MINI_ARM_SOLVER_VALUE}"
 export GRADIENT_TELEOP_MODE="${TELEOP_MODE}"
 export GRADIENT_JOG_FREQUENCY_HZ="${JOG_FREQUENCY}"
 export GRADIENT_JOG_SERVO_SPEED_REGISTER="${JOINT_SPEED_LIMIT}"
+export GRADIENT_DIAGNOSTIC_LOGGING="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo 1 || echo 0)"
+export MINI_ARM_IK_LOG="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo 1 || echo 0)"
+export GRADIENT_JOG_DEBUG_LOG="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo 1 || echo 0)"
 
 LOG_DIR="${REPO_ROOT}/logs/stack/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
@@ -234,6 +253,7 @@ echo "  solver=${SOLVER} (MINI_ARM_SOLVER=${MINI_ARM_SOLVER})"
 echo "  teleop_mode=${GRADIENT_TELEOP_MODE}"
 echo "  jog_frequency=${GRADIENT_JOG_FREQUENCY_HZ} Hz"
 echo "  joint_speed_limit=${GRADIENT_JOG_SERVO_SPEED_REGISTER} raw register"
+echo "  diagnostic_logging=${DIAGNOSTIC_LOGGING}"
 echo "  hebi_bridge=${HEBI_BRIDGE}"
 echo "  hebi_live=${HEBI_LIVE}"
 echo "  vision=false"
@@ -246,6 +266,9 @@ if [[ "${HEBI_BRIDGE}" == "true" ]]; then
   hebi_cmd=("${VENV_PY}" -m gradient_os.teleop.hebi_mobile_io_bridge --api-host "${api_host}")
   if [[ "${HEBI_LIVE}" == "true" ]]; then
     hebi_cmd+=(--live)
+  fi
+  if [[ "${DIAGNOSTIC_LOGGING}" == "true" ]]; then
+    hebi_cmd+=(--diagnostic-log)
   fi
   launch hebi-bridge "${hebi_cmd[@]}"
 fi

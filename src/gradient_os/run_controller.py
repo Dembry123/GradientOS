@@ -74,6 +74,18 @@ def _validate_real_servo_startup(selected_robot: RobotConfig, active_backend) ->
     return False
 
 
+def _configure_startup_diagnostics() -> None:
+    """Apply diagnostic logging toggles requested before controller startup."""
+    if _env_flag("MINI_ARM_IK_LOG"):
+        utils.trajectory_state["diagnostics_enabled"] = True
+        os.environ["MINI_ARM_IK_LOG"] = "1"
+        print("[Controller] Startup IK/trajectory diagnostics enabled.")
+
+    if _env_flag("GRADIENT_JOG_DEBUG_LOG"):
+        utils.trajectory_state["jog_debug"] = True
+        print("[Controller] Startup realtime jog diagnostic logging enabled.")
+
+
 def main():
     """
     Main entry point for the robot controller.
@@ -146,6 +158,8 @@ Examples:
             except Exception as e:
                 print(f"  - {robot_name}: (error loading: {e})")
         sys.exit(0)
+
+    _configure_startup_diagnostics()
 
     # ==========================================================================
     # Initialize Robot Configuration
