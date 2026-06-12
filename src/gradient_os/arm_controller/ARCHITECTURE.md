@@ -579,4 +579,4 @@ class RobotConfig(ABC):
 
 ## Cleanup Status
 
-The package-level servo runtime shims and the archived monolithic controller have been removed. Backend-native maintenance scripts should live under `scripts/`; the old bulk zero-offset reset helper is now represented by `scripts/reset_servo_zero_offsets.py`.
+The package-level servo runtime shims and the archived monolithic controller have been removed. Backend-native maintenance scripts should live under `scripts/`; hardware zeroing is handled through the active backend's `set_current_position_as_zero()` path rather than archived package-level shims.

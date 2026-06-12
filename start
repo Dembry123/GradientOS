@@ -192,6 +192,14 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+STACK_SESSION_ID="$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="${REPO_ROOT}/logs/stack/${STACK_SESSION_ID}"
+DIAGNOSTIC_DIR="${LOG_DIR}/diagnostics"
+mkdir -p "${LOG_DIR}"
+if [[ "${DIAGNOSTIC_LOGGING}" == "true" ]]; then
+  mkdir -p "${DIAGNOSTIC_DIR}"
+fi
+
 if [[ -d "${VENV_BIN}" ]]; then
   export PATH="${VENV_BIN}:${PATH}"
 fi
@@ -201,12 +209,15 @@ export MINI_ARM_SOLVER="${MINI_ARM_SOLVER_VALUE}"
 export GRADIENT_TELEOP_MODE="${TELEOP_MODE}"
 export GRADIENT_JOG_FREQUENCY_HZ="${JOG_FREQUENCY}"
 export GRADIENT_JOG_SERVO_SPEED_REGISTER="${JOINT_SPEED_LIMIT}"
+export GRADIENT_STACK_SESSION_ID="${STACK_SESSION_ID}"
+export GRADIENT_DIAGNOSTIC_SESSION_ID="${STACK_SESSION_ID}"
+export GRADIENT_STACK_LOG_DIR="${LOG_DIR}"
+export GRADIENT_DIAGNOSTIC_DIR="${DIAGNOSTIC_DIR}"
 export GRADIENT_DIAGNOSTIC_LOGGING="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo 1 || echo 0)"
 export MINI_ARM_IK_LOG="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo 1 || echo 0)"
 export GRADIENT_JOG_DEBUG_LOG="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo 1 || echo 0)"
-
-LOG_DIR="${REPO_ROOT}/logs/stack/$(date +%Y%m%d_%H%M%S)"
-mkdir -p "${LOG_DIR}"
+export GRADIENT_TELEMETRY_DIAGNOSTIC_LOG="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo "${DIAGNOSTIC_DIR}/controller-telemetry.jsonl" || echo "")"
+export GRADIENT_MONITOR_DIAGNOSTIC_LOG="$([[ "${DIAGNOSTIC_LOGGING}" == "true" ]] && echo "${DIAGNOSTIC_DIR}/monitor-api.jsonl" || echo "")"
 
 pids=()
 names=()
@@ -254,6 +265,9 @@ echo "  teleop_mode=${GRADIENT_TELEOP_MODE}"
 echo "  jog_frequency=${GRADIENT_JOG_FREQUENCY_HZ} Hz"
 echo "  joint_speed_limit=${GRADIENT_JOG_SERVO_SPEED_REGISTER} raw register"
 echo "  diagnostic_logging=${DIAGNOSTIC_LOGGING}"
+if [[ "${DIAGNOSTIC_LOGGING}" == "true" ]]; then
+  echo "  diagnostic_dir=${DIAGNOSTIC_DIR}"
+fi
 echo "  hebi_bridge=${HEBI_BRIDGE}"
 echo "  hebi_live=${HEBI_LIVE}"
 echo "  vision=false"

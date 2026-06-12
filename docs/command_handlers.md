@@ -156,10 +156,10 @@ SET_ORIENTATION,0,30,0,1.5,true
     -   `id`: (int, required) The physical ID of the servo to calibrate (e.g., 10, 20, 21).
 
 #### `SET_ZERO`
--   **Syntax:** `SET_ZERO,id`
--   **Description:** Sets the current physical position of a specific servo as its new permanent hardware zero point. This is a destructive operation written to the servo's EEPROM.
+-   **Syntax:** `SET_ZERO,joint`
+-   **Description:** Sets the current physical position of the servo or paired servos for a logical joint as the new permanent hardware zero point. This is a destructive operation written to servo EEPROM.
 -   **Parameters:**
-    -   `id`: (int, required) The physical ID of the servo to zero.
+    -   `joint`: (int, required) The 1-based logical joint number to zero. Paired joints zero every actuator mapped to that joint.
 
 #### `GET_ALL_POSITIONS`
 -   **Syntax:** `GET_ALL_POSITIONS`

@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+REPO_ROOT="${PWD}"
+VENV_PY="${REPO_ROOT}/.venv/bin/python"
+
+if [[ ! -x "${VENV_PY}" ]]; then
+  echo "[gradient-robotics] ERROR: Missing ${VENV_PY}" >&2
+  echo "[gradient-robotics] Run ./setup.sh first." >&2
+  exit 1
+fi
+
+export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
+exec "${VENV_PY}" "${REPO_ROOT}/scripts/read_servo_registers.py" "$@"

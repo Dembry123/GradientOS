@@ -102,6 +102,51 @@ def test_jog_thread_rechecks_stop_before_servo_command(monkeypatch):
     assert command_handlers.utils.trajectory_state["is_jogging"] is False
 
 
+def test_absolute_pose_jog_does_not_read_servos_after_command(monkeypatch):
+    command_handlers.utils.trajectory_state["is_jogging"] = True
+    command_handlers.utils.trajectory_state["is_running"] = False
+    command_handlers.utils.trajectory_state["jog_deadman"] = True
+    command_handlers.utils.trajectory_state["jog_mode"] = "absolute_pose"
+    command_handlers.utils.trajectory_state["jog_target_position_m"] = np.array([0.01, 0.0, 0.0])
+    command_handlers.utils.trajectory_state["jog_target_orientation_matrix"] = np.eye(3)
+    command_handlers.utils.trajectory_state["last_jog_target_time"] = command_handlers.time.monotonic()
+    command_handlers.utils.trajectory_state["last_jog_command_time"] = command_handlers.time.monotonic()
+    command_handlers.utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    command_handlers.utils.trajectory_state["jog_thread"] = None
+    monkeypatch.setattr(
+        command_handlers.utils,
+        "LOGICAL_JOINT_LIMITS_RAD",
+        [(-np.pi, np.pi)] * 6,
+    )
+
+    command_sent = False
+
+    def get_joint_positions(verbose=False):
+        if command_sent:
+            raise AssertionError("post-command servo read should not happen in the same jog tick")
+        return np.zeros(6)
+
+    monkeypatch.setattr(command_handlers.actuators, "get_joint_positions", get_joint_positions)
+    monkeypatch.setattr(command_handlers.ik_solver, "get_fk_matrix", lambda q: np.eye(4))
+    monkeypatch.setattr(
+        command_handlers.ik_solver,
+        "solve_ik",
+        lambda *, target_position, target_orientation_matrix, initial_joint_angles: np.full(6, 0.01),
+    )
+
+    def set_joint_positions(positions, speed, accel):
+        nonlocal command_sent
+        command_sent = True
+        command_handlers.utils.trajectory_state["is_jogging"] = False
+
+    monkeypatch.setattr(command_handlers.actuators, "set_joint_positions", set_joint_positions)
+    monkeypatch.setattr(command_handlers.time, "sleep", lambda seconds: None)
+
+    command_handlers._jog_controller_thread()
+
+    assert command_sent is True
+
+
 def test_jog_debug_writes_diagnostic_record_for_ik_failure(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     command_handlers.utils.trajectory_state["is_jogging"] = True

@@ -46,10 +46,121 @@ except ImportError as e:
 AVAILABLE_SERVO_BACKENDS = backend_registry.list_available_backends()
 _TEST_SHUTDOWN_COMMAND = "__TEST_SHUTDOWN__"
 _TEST_SHUTDOWN_ENV = "GRADIENT_ALLOW_CONTROLLER_SHUTDOWN"
+_DIAG_HANDLES: dict[str, object] = {}
+_DIAG_LOCK = threading.Lock()
 
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _json_diagnostic_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return _json_diagnostic_safe(value.tolist())
+    if isinstance(value, (list, tuple)):
+        return [_json_diagnostic_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_diagnostic_safe(item) for key, item in value.items()}
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (bool, str)):
+        return value
+    return str(value)
+
+
+def _diagnostic_session_id() -> str:
+    return os.environ.get("GRADIENT_DIAGNOSTIC_SESSION_ID") or os.environ.get(
+        "GRADIENT_STACK_SESSION_ID",
+        "controller",
+    )
+
+
+def _diagnostic_jsonl_path(env_name: str, filename: str) -> str | None:
+    explicit = os.environ.get(env_name, "").strip()
+    if explicit:
+        return explicit
+    if not _env_flag("GRADIENT_DIAGNOSTIC_LOGGING"):
+        return None
+    diag_dir = os.environ.get("GRADIENT_DIAGNOSTIC_DIR", "").strip()
+    if not diag_dir:
+        diag_dir = os.path.join("diagnostics", "stack", _diagnostic_session_id())
+    return os.path.join(diag_dir, filename)
+
+
+def _write_jsonl_diagnostic(env_name: str, filename: str, event: str, **fields) -> None:
+    path = _diagnostic_jsonl_path(env_name, filename)
+    if not path:
+        return
+    payload = {
+        "time": time.time(),
+        "event": event,
+        "session_id": _diagnostic_session_id(),
+        **{key: _json_diagnostic_safe(value) for key, value in fields.items()},
+    }
+    try:
+        with _DIAG_LOCK:
+            handle = _DIAG_HANDLES.get(path)
+            if handle is None or getattr(handle, "closed", True):
+                path_dir = os.path.dirname(path)
+                if path_dir:
+                    os.makedirs(path_dir, exist_ok=True)
+                handle = open(path, "a", buffering=1)
+                _DIAG_HANDLES[path] = handle
+            handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception as exc:
+        print(f"[Diagnostics] WARNING: Failed to write {event} diagnostic: {exc}")
+
+
+def _write_telemetry_diagnostic(event: str, **fields) -> None:
+    _write_jsonl_diagnostic(
+        "GRADIENT_TELEMETRY_DIAGNOSTIC_LOG",
+        "controller-telemetry.jsonl",
+        event,
+        **fields,
+    )
+
+
+def _close_jsonl_diagnostics() -> None:
+    with _DIAG_LOCK:
+        handles = list(_DIAG_HANDLES.values())
+        _DIAG_HANDLES.clear()
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+
+def _summarize_jog_ik_status(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    keys = (
+        "status",
+        "reason",
+        "updated_at",
+        "successes_total",
+        "failures_total",
+        "consecutive_failures",
+        "is_jogging",
+        "deadman",
+        "teleop_mode",
+        "solver",
+        "solve_time_ms",
+        "dt_s",
+        "target_age_s",
+        "command_age_s",
+        "q_delta_rad",
+        "q_measured_rad",
+        "q_commanded_rad",
+        "current_position_m",
+        "target_position_m",
+        "pose_error_m",
+    )
+    return {key: value[key] for key in keys if key in value}
 
 
 def _validate_real_servo_startup(selected_robot: RobotConfig, active_backend) -> bool:
@@ -340,15 +451,45 @@ Examples:
             period = 1.0 / max(1, int(telemetry_hz))
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             last_extra_ts = 0.0  # throttle extended servo telemetry to ~2 Hz
+            telemetry_sequence = 0
             
             try:
                 telemetry_blocks = backend_registry.get_telemetry_blocks()
-            except Exception:
+            except Exception as exc:
                 telemetry_blocks = []
+                _write_telemetry_diagnostic(
+                    "telemetry_blocks_unavailable",
+                    error=repr(exc),
+                )
+
+            _write_telemetry_diagnostic(
+                "telemetry_thread_start",
+                target=telemetry_target,
+                telemetry_hz=telemetry_hz,
+                period_s=period,
+                servo_backend=servo_backend,
+                robot=selected_robot.name,
+                telemetry_blocks=[
+                    {"address": int(addr), "length": int(length)}
+                    for addr, length in telemetry_blocks
+                ],
+            )
             
             while not telemetry_stop_event.is_set():
+                telemetry_sequence += 1
+                loop_start_perf = time.perf_counter()
+                loop_start_wall = time.time()
+                joint_read_ms = None
+                send_ms = None
+                payload_bytes = 0
+                q = None
+                msg: dict[str, object] = {}
+                extra_block_reads: list[dict[str, object]] = []
+                alerts_count = 0
                 try:
+                    read_start = time.perf_counter()
                     q = actuators.get_joint_positions(verbose=False)
+                    joint_read_ms = (time.perf_counter() - read_start) * 1000.0
                     g = utils.current_gripper_angle_rad if utils.gripper_present else None
                     msg: dict[str, object] = {"t": time.time(), "joints": [float(x) for x in q]}
                     if g is not None:
@@ -371,14 +512,27 @@ Examples:
                             if present_ids and telemetry_blocks:
                                 # Read telemetry blocks using backend-defined addresses
                                 block_data = []
-                                for addr, length in telemetry_blocks:
-                                    block_data.append(actuators.sync_read_block(
+                                for block_index, (addr, length) in enumerate(telemetry_blocks):
+                                    block_start = time.perf_counter()
+                                    raw_block = actuators.sync_read_block(
                                         present_ids,
                                         start_address=addr,
                                         data_len=length,
                                         timeout_s=0.05,
                                         diagnostics=False,
-                                    ))
+                                    )
+                                    block_ms = (time.perf_counter() - block_start) * 1000.0
+                                    block_data.append(raw_block)
+                                    extra_block_reads.append(
+                                        {
+                                            "block_index": block_index,
+                                            "address": int(addr),
+                                            "length": int(length),
+                                            "duration_ms": block_ms,
+                                            "present_ids": present_ids,
+                                            "response_ids": sorted(int(sid) for sid in raw_block.keys()),
+                                        }
+                                    )
                                 
                                 servos: dict[str, dict[str, object]] = {}
                                 for sid in present_ids:
@@ -396,7 +550,12 @@ Examples:
                                 
                                 if servos:
                                     msg["servos"] = servos
-                        except Exception:
+                        except Exception as exc:
+                            _write_telemetry_diagnostic(
+                                "telemetry_extra_blocks_error",
+                                sequence=telemetry_sequence,
+                                error=repr(exc),
+                            )
                             # Do not let telemetry extras break the main joints stream
                             pass
                     
@@ -404,19 +563,64 @@ Examples:
                     try:
                         drained = _alerts.drain_alerts(max_items=25)
                         if drained:
+                            alerts_count = len(drained)
                             # Keep payload small: convert ts to ms for UI display
                             for a in drained:
                                 # nothing to mutate; just ensure JSON-serializable
                                 a["ts"] = float(a.get("ts", time.time()))
                             msg["alerts"] = drained
-                    except Exception:
-                            pass
+                    except Exception as exc:
+                        _write_telemetry_diagnostic(
+                            "telemetry_alerts_error",
+                            sequence=telemetry_sequence,
+                            error=repr(exc),
+                        )
                     
                     if telemetry_target is not None:
-                        udp.sendto(json.dumps(msg).encode("utf-8"), telemetry_target)
-                except Exception:
-                    pass
+                        payload = json.dumps(msg).encode("utf-8")
+                        payload_bytes = len(payload)
+                        send_start = time.perf_counter()
+                        udp.sendto(payload, telemetry_target)
+                        send_ms = (time.perf_counter() - send_start) * 1000.0
+                    loop_ms = (time.perf_counter() - loop_start_perf) * 1000.0
+                    _write_telemetry_diagnostic(
+                        "telemetry_tick",
+                        sequence=telemetry_sequence,
+                        loop_start_time=loop_start_wall,
+                        telemetry_hz=telemetry_hz,
+                        target=telemetry_target,
+                        joint_read_ms=joint_read_ms,
+                        joints=[float(x) for x in q] if q is not None else None,
+                        joint_count=len(q) if q is not None else 0,
+                        gripper=float(g) if g is not None else None,
+                        jog_ik=_summarize_jog_ik_status(jog_ik_status),
+                        servo_block_reads=extra_block_reads,
+                        servo_payload_ids=sorted(msg.get("servos", {}).keys()) if isinstance(msg.get("servos"), dict) else [],
+                        alerts_count=alerts_count,
+                        payload_bytes=payload_bytes,
+                        send_ms=send_ms,
+                        loop_ms=loop_ms,
+                    )
+                except Exception as exc:
+                    _write_telemetry_diagnostic(
+                        "telemetry_tick_error",
+                        sequence=telemetry_sequence,
+                        loop_start_time=loop_start_wall,
+                        telemetry_hz=telemetry_hz,
+                        target=telemetry_target,
+                        joint_read_ms=joint_read_ms,
+                        payload_bytes=payload_bytes,
+                        send_ms=send_ms,
+                        error=repr(exc),
+                        traceback=traceback.format_exc(),
+                    )
                 time.sleep(period)
+            _write_telemetry_diagnostic(
+                "telemetry_thread_stop",
+                sequence=telemetry_sequence,
+                target=telemetry_target,
+                telemetry_hz=telemetry_hz,
+            )
 
         # --- Episode recorder process state ---
         recorder_proc = None
@@ -1107,6 +1311,7 @@ Examples:
         if utils.ser and utils.ser.is_open:
             utils.ser.close()
             print("[Controller] Serial port closed.")
+        _close_jsonl_diagnostics()
 
 if __name__ == "__main__":
     main()

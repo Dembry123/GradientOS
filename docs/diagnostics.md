@@ -14,7 +14,12 @@ When using the full stack launcher, enable diagnostic logging with:
 ./start --diagnostic-logging
 ```
 
-That sets `MINI_ARM_IK_LOG=1` for the controller, enables realtime jog JSONL logging, and passes `--diagnostic-log` to the HEBI Mobile I/O bridge when the bridge is started by `./start`.
+That sets `MINI_ARM_IK_LOG=1` for the controller, enables realtime jog JSONL logging, passes `--diagnostic-log` to the HEBI Mobile I/O bridge when the bridge is started by `./start`, and creates per-stack-session telemetry diagnostics under `logs/stack/<session>/diagnostics/`.
+
+The stack-session diagnostics include:
+
+- `controller-telemetry.jsonl`: one record when the controller telemetry thread starts/stops and one `telemetry_tick` record per telemetry sample, including measured joints, joint-read timing, optional servo telemetry block timing, `jog_ik`, payload byte size, and UDP send timing.
+- `monitor-api.jsonl`: `/monitor` lifecycle and fanout records, including subscriptions, inbound controller UDP datagrams, queue drops, and SSE yield records with the joint payload summary sent toward the browser visualizer.
 
 If you are running the controller by itself, set the `MINI_ARM_IK_LOG` environment variable to `1` before starting the controller.
 

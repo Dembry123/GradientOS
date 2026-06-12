@@ -40,6 +40,8 @@ _REST_POSE_COMMAND = ",".join(str(value) for value in _REST_POSE_RAD)
 _ALLOWED_WELD_TYPES = {"fillet", "butt", "lap", "tack/spot", "custom"}
 _PROJECT_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _WELD_PROGRAM_DIR = os.path.join(_PROJECT_ROOT_DIR, "recorded_trajectories", "weld_programs")
+_MONITOR_DIAG_HANDLES: dict[str, object] = {}
+_MONITOR_DIAG_LOCK = asyncio.Lock()
 
 
 def _default_controller_port() -> int:
@@ -48,6 +50,144 @@ def _default_controller_port() -> int:
         if port is not None:
             return int(port)
     return 3000
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _json_diagnostic_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return _json_diagnostic_safe(value.tolist())
+    if isinstance(value, (list, tuple)):
+        return [_json_diagnostic_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_diagnostic_safe(item) for key, item in value.items()}
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (bool, str)):
+        return value
+    return str(value)
+
+
+def _diagnostic_session_id() -> str:
+    return os.environ.get("GRADIENT_DIAGNOSTIC_SESSION_ID") or os.environ.get(
+        "GRADIENT_STACK_SESSION_ID",
+        "api",
+    )
+
+
+def _monitor_diagnostic_path() -> str | None:
+    explicit = os.environ.get("GRADIENT_MONITOR_DIAGNOSTIC_LOG", "").strip()
+    if explicit:
+        return explicit
+    if not _env_flag("GRADIENT_DIAGNOSTIC_LOGGING"):
+        return None
+    diag_dir = os.environ.get("GRADIENT_DIAGNOSTIC_DIR", "").strip()
+    if not diag_dir:
+        diag_dir = os.path.join("diagnostics", "stack", _diagnostic_session_id())
+    return os.path.join(diag_dir, "monitor-api.jsonl")
+
+
+def _monitor_diagnostics_enabled() -> bool:
+    return _monitor_diagnostic_path() is not None
+
+
+async def _write_monitor_diagnostic(event: str, **fields: Any) -> None:
+    path = _monitor_diagnostic_path()
+    if not path:
+        return
+    payload = {
+        "time": time.time(),
+        "event": event,
+        "session_id": _diagnostic_session_id(),
+        **{key: _json_diagnostic_safe(value) for key, value in fields.items()},
+    }
+    try:
+        async with _MONITOR_DIAG_LOCK:
+            handle = _MONITOR_DIAG_HANDLES.get(path)
+            if handle is None or getattr(handle, "closed", True):
+                path_dir = os.path.dirname(path)
+                if path_dir:
+                    os.makedirs(path_dir, exist_ok=True)
+                handle = open(path, "a", buffering=1)
+                _MONITOR_DIAG_HANDLES[path] = handle
+            handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception as exc:
+        logger.warning("Failed to write monitor diagnostic %s: %s", event, exc)
+
+
+def _schedule_monitor_diagnostic(event: str, **fields: Any) -> None:
+    if not _monitor_diagnostics_enabled():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_write_monitor_diagnostic(event, **fields))
+
+
+async def _close_monitor_diagnostics() -> None:
+    async with _MONITOR_DIAG_LOCK:
+        handles = list(_MONITOR_DIAG_HANDLES.values())
+        _MONITOR_DIAG_HANDLES.clear()
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+
+def _summarize_jog_ik(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    keys = (
+        "status",
+        "reason",
+        "updated_at",
+        "successes_total",
+        "failures_total",
+        "consecutive_failures",
+        "is_jogging",
+        "deadman",
+        "teleop_mode",
+        "solver",
+        "solve_time_ms",
+        "dt_s",
+        "target_age_s",
+        "command_age_s",
+        "q_delta_rad",
+        "q_measured_rad",
+        "q_commanded_rad",
+        "current_position_m",
+        "target_position_m",
+        "pose_error_m",
+    )
+    return {key: value[key] for key in keys if key in value}
+
+
+def _summarize_monitor_payload(parsed: Any) -> dict[str, Any]:
+    if not isinstance(parsed, dict):
+        return {"parsed": False}
+    joints = parsed.get("joints")
+    servos = parsed.get("servos")
+    alerts = parsed.get("alerts")
+    return {
+        "parsed": True,
+        "controller_t": parsed.get("t"),
+        "joints": joints if isinstance(joints, list) else None,
+        "joint_count": len(joints) if isinstance(joints, list) else 0,
+        "gripper": parsed.get("gripper"),
+        "weld_active": parsed.get("weld_active"),
+        "weld_type": parsed.get("weld_type"),
+        "jog_ik": _summarize_jog_ik(parsed.get("jog_ik")),
+        "servo_ids": sorted(servos.keys()) if isinstance(servos, dict) else [],
+        "alerts_count": len(alerts) if isinstance(alerts, list) else 0,
+    }
 
 
 def _resolve_controller_endpoint() -> Tuple[str, int]:
@@ -259,15 +399,36 @@ class TelemetryHub:
             self._counter += 1
             token = self._counter
             self._subscribers[token] = queue
+            subscriber_count = len(self._subscribers)
+        await _write_monitor_diagnostic(
+            "monitor_subscribe",
+            token=token,
+            first_client=first_client,
+            subscriber_count=subscriber_count,
+            queue_maxsize=queue.maxsize,
+        )
         return token, queue
 
     async def unregister(self, token: int) -> None:
         async with self._lock:
             self._subscribers.pop(token, None)
+            subscriber_count = len(self._subscribers)
+            await _write_monitor_diagnostic(
+                "monitor_unsubscribe",
+                token=token,
+                subscriber_count=subscriber_count,
+            )
             if not self._subscribers:
                 await self._stop()
 
     async def _start(self) -> None:
+        await _write_monitor_diagnostic(
+            "monitor_start",
+            bind_host=self._bind_host,
+            advertise_host=self._advertise_host,
+            aux_listen_port=self._aux_listen_port,
+            autostart_servo_telemetry=self._autostart_servo_telemetry,
+        )
         loop = asyncio.get_running_loop()
         transport, _protocol = await loop.create_datagram_endpoint(
             lambda: _TelemetryProtocol(self),
@@ -279,10 +440,26 @@ class TelemetryHub:
         listen_host = self._advertise_host or _resolve_controller_endpoint()[0]
         self._listen_port = sockname[1]
         start_cmd = f"START_TELEMETRY,{listen_host}:{self._listen_port},10"
+        await _write_monitor_diagnostic(
+            "monitor_udp_listener_ready",
+            listen_host=listen_host,
+            listen_port=self._listen_port,
+            start_command=start_cmd,
+        )
         ok, detail = await run_in_threadpool(_send_controller_command, start_cmd)
         if not ok:
+            await _write_monitor_diagnostic(
+                "monitor_start_telemetry_failed",
+                start_command=start_cmd,
+                detail=detail,
+            )
             await self._cleanup_transport()
             raise HTTPException(status_code=503, detail=detail)
+        await _write_monitor_diagnostic(
+            "monitor_start_telemetry_ack",
+            start_command=start_cmd,
+            detail=detail,
+        )
         # Optionally also open a fixed auxiliary UDP port to ingest extra telemetry sources.
         if self._aux_listen_port and self._aux_listen_port > 0:
             try:
@@ -294,6 +471,17 @@ class TelemetryHub:
             except Exception:
                 # If aux port binding fails, continue without it.
                 self._aux_transport = None
+                await _write_monitor_diagnostic(
+                    "monitor_aux_bind_failed",
+                    bind_host=self._bind_host,
+                    aux_listen_port=self._aux_listen_port,
+                )
+            else:
+                await _write_monitor_diagnostic(
+                    "monitor_aux_listener_ready",
+                    bind_host=self._bind_host,
+                    aux_listen_port=self._aux_listen_port,
+                )
         # Autostart the servo telemetry streamer so charts work by default
         if self._autostart_servo_telemetry and self._aux_listen_port and self._aux_listen_port > 0:
             try:
@@ -311,12 +499,28 @@ class TelemetryHub:
                 )
             except Exception:
                 self._servo_proc = None
+                await _write_monitor_diagnostic(
+                    "monitor_servo_telemetry_autostart_failed",
+                    command=cmd,
+                )
+            else:
+                await _write_monitor_diagnostic(
+                    "monitor_servo_telemetry_autostarted",
+                    command=cmd,
+                    pid=self._servo_proc.pid if self._servo_proc is not None else None,
+                )
 
     async def _stop(self) -> None:
         if self._listen_port is None:
             return
         stop_cmd = "STOP_TELEMETRY"
-        await run_in_threadpool(_send_controller_command, stop_cmd)
+        ok, detail = await run_in_threadpool(_send_controller_command, stop_cmd)
+        await _write_monitor_diagnostic(
+            "monitor_stop",
+            stop_command=stop_cmd,
+            ok=ok,
+            detail=detail,
+        )
         await self._cleanup_transport()
 
     async def _cleanup_transport(self) -> None:
@@ -342,28 +546,62 @@ class TelemetryHub:
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
+            _schedule_monitor_diagnostic(
+                "monitor_datagram_decode_error",
+                source_addr=addr,
+                bytes=len(data),
+            )
             return
-        event_payload = self._format_event(text)
+        parsed: Any | None = None
+        try:
+            parsed = json.loads(text)
+            event_payload = json.dumps(parsed)
+        except json.JSONDecodeError:
+            event_payload = text
+
+        delivered = 0
+        dropped_oldest = 0
+        skipped_full = 0
         for queue in list(self._subscribers.values()):
             try:
                 queue.put_nowait(event_payload)
+                delivered += 1
             except asyncio.QueueFull:
                 try:
                     _ = queue.get_nowait()
+                    dropped_oldest += 1
                 except asyncio.QueueEmpty:
                     pass
                 try:
                     queue.put_nowait(event_payload)
+                    delivered += 1
                 except asyncio.QueueFull:
                     # If still full, skip this subscriber to avoid blocking.
+                    skipped_full += 1
                     continue
+        _schedule_monitor_diagnostic(
+            "monitor_datagram",
+            source_addr=addr,
+            bytes=len(data),
+            subscribers=len(self._subscribers),
+            delivered=delivered,
+            dropped_oldest=dropped_oldest,
+            skipped_full=skipped_full,
+            payload_summary=_summarize_monitor_payload(parsed),
+        )
 
-    def _format_event(self, text: str) -> str:
+    async def log_sse_yield(self, token: int, message: str, queue_size_after_get: int) -> None:
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(message)
         except json.JSONDecodeError:
-            return text
-        return json.dumps(parsed)
+            parsed = None
+        await _write_monitor_diagnostic(
+            "monitor_sse_yield",
+            token=token,
+            bytes=len(message.encode("utf-8")),
+            queue_size_after_get=queue_size_after_get,
+            payload_summary=_summarize_monitor_payload(parsed),
+        )
 
 
 telemetry_hub = TelemetryHub()
@@ -394,7 +632,10 @@ def create_app() -> FastAPI:
             logger.info("Controller: %s:%s", host, port)
         else:
             logger.warning("Controller: %s:%s (%s)", host, port, detail)
-        yield
+        try:
+            yield
+        finally:
+            await _close_monitor_diagnostics()
 
     api = FastAPI(title="GradientOS API", version="0.1.0", lifespan=lifespan)
     origins = _resolve_cors_origins()
@@ -732,6 +973,11 @@ def create_app() -> FastAPI:
             try:
                 while True:
                     message = await queue.get()
+                    await telemetry_hub.log_sse_yield(
+                        token,
+                        message,
+                        queue.qsize(),
+                    )
                     yield message
             except asyncio.CancelledError:
                 raise

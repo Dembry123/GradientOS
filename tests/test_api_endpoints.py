@@ -8,7 +8,7 @@ pytest.importorskip("httpx")
 from contextlib import contextmanager
 from fastapi.testclient import TestClient
 
-from gradient_os.api.main import create_app
+from gradient_os.api.main import create_app, _summarize_monitor_payload
 
 
 @contextmanager
@@ -266,6 +266,37 @@ def test_control_jog_target_pose(client):
         1.0,
         False,
     )
+
+
+def test_monitor_payload_summary_includes_visualizer_state():
+    summary = _summarize_monitor_payload(
+        {
+            "t": 123.0,
+            "joints": [0.1, 0.2, 0.3],
+            "gripper": 0.4,
+            "weld_active": True,
+            "servos": {"10": {"temp_c": 30}, "20": {"temp_c": 31}},
+            "alerts": [{"kind": "SYNCREAD_TIMEOUT"}],
+            "jog_ik": {
+                "status": "ok",
+                "teleop_mode": "absolute_pose",
+                "q_delta_rad": [0.01, 0.0, 0.0],
+                "ignored": "not logged",
+            },
+        }
+    )
+
+    assert summary["controller_t"] == 123.0
+    assert summary["joints"] == [0.1, 0.2, 0.3]
+    assert summary["joint_count"] == 3
+    assert summary["gripper"] == 0.4
+    assert summary["servo_ids"] == ["10", "20"]
+    assert summary["alerts_count"] == 1
+    assert summary["jog_ik"] == {
+        "status": "ok",
+        "teleop_mode": "absolute_pose",
+        "q_delta_rad": [0.01, 0.0, 0.0],
+    }
 
 
 def test_teleop_phone_pose_round_trip(client):

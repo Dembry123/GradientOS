@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Set current GradientOS joint positions as persistent servo zero positions."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import socket
+import sys
+import time
+from pathlib import Path
+
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 3000
+DEFAULT_CONTROLLER_TIMEOUT_S = 20.0
+PROBE_COMMAND = "GET_POSITION"
+ARM_JOINTS = tuple(range(1, 7))
+GRIPPER_JOINT = 7
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Send SET_ZERO commands to the running GradientOS controller. "
+            "By default this zeros arm joints 1-6."
+        )
+    )
+    parser.add_argument(
+        "joints",
+        nargs="*",
+        type=int,
+        help="Optional logical joint numbers to zero. Defaults to 1 2 3 4 5 6.",
+    )
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"Controller hostname or IP address. Default: {DEFAULT_HOST}",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"Controller UDP port. Default: {DEFAULT_PORT}",
+    )
+    parser.add_argument(
+        "--include-gripper",
+        action="store_true",
+        help="Include logical joint 7, if the active robot maps a gripper actuator.",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.15,
+        help="Seconds to wait between SET_ZERO commands. Default: 0.15",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive EEPROM-write confirmation.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print commands without sending them.",
+    )
+    parser.add_argument(
+        "--no-start-controller",
+        action="store_true",
+        help="Fail if the controller is not already responding instead of launching ./run.sh.",
+    )
+    parser.add_argument(
+        "--controller-timeout",
+        type=float,
+        default=DEFAULT_CONTROLLER_TIMEOUT_S,
+        help=f"Seconds to wait for an auto-started controller to respond. Default: {DEFAULT_CONTROLLER_TIMEOUT_S:g}",
+    )
+    parser.add_argument(
+        "--controller-arg",
+        action="append",
+        default=[],
+        help="Extra argument to pass to ./run.sh when auto-starting the controller. Repeat for multiple args.",
+    )
+    return parser.parse_args()
+
+
+def selected_joints(args: argparse.Namespace) -> list[int]:
+    joints = list(args.joints) if args.joints else list(ARM_JOINTS)
+    if args.include_gripper and GRIPPER_JOINT not in joints:
+        joints.append(GRIPPER_JOINT)
+
+    invalid = [joint for joint in joints if joint < 1 or joint > GRIPPER_JOINT]
+    if invalid:
+        raise ValueError(f"Invalid joint number(s): {invalid}. Expected 1-6, or 7 for gripper.")
+
+    seen: set[int] = set()
+    deduped: list[int] = []
+    for joint in joints:
+        if joint not in seen:
+            deduped.append(joint)
+            seen.add(joint)
+    return deduped
+
+
+def confirm(joints: list[int], args: argparse.Namespace) -> None:
+    if args.yes or args.dry_run:
+        return
+
+    print("WARNING: This writes persistent servo EEPROM calibration.")
+    print("The current physical position of each selected joint will become its hardware zero.")
+    print(f"Target controller: {args.host}:{args.port}")
+    print(f"Selected logical joints: {' '.join(str(joint) for joint in joints)}")
+    print()
+    answer = input("Type 'set zero' to continue: ").strip().lower()
+    if answer != "set zero":
+        raise RuntimeError("Aborted.")
+
+
+def _is_local_controller(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _udp_address(host: str, port: int):
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    if not infos:
+        raise OSError(f"No UDP address found for {host}:{port}")
+    family, socktype, proto, _canonname, sockaddr = infos[0]
+    return family, socktype, proto, sockaddr
+
+
+def _probe_controller(host: str, port: int, timeout_s: float = 0.35) -> bool:
+    family, socktype, proto, sockaddr = _udp_address(host, port)
+    with socket.socket(family, socktype, proto) as sock:
+        sock.settimeout(timeout_s)
+        try:
+            sock.sendto(PROBE_COMMAND.encode("utf-8"), sockaddr)
+            data, _ = sock.recvfrom(4096)
+        except OSError:
+            return False
+    return bool(data)
+
+
+def _start_controller(args: argparse.Namespace) -> subprocess.Popen:
+    if not _is_local_controller(args.host):
+        raise RuntimeError(
+            f"Controller at {args.host}:{args.port} is not responding. "
+            "Auto-start is only supported for local controller hosts."
+        )
+    if args.port != DEFAULT_PORT:
+        raise RuntimeError(
+            f"Controller at {args.host}:{args.port} is not responding. "
+            f"Auto-start uses the robot-configured controller port {DEFAULT_PORT}."
+        )
+    if _controller_process_exists():
+        raise RuntimeError(
+            "A local gradient_os.run_controller process exists, but it did not respond "
+            f"to {PROBE_COMMAND}. Refusing to start a second controller."
+        )
+
+    repo_root = Path(__file__).resolve().parent
+    run_script = repo_root / "run.sh"
+    if not run_script.exists():
+        raise RuntimeError(f"Could not find controller launcher: {run_script}")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{repo_root / 'src'}:{env.get('PYTHONPATH', '')}"
+    cmd = [str(run_script), *args.controller_arg]
+    print(f"Controller is not responding on {args.host}:{args.port}; starting {' '.join(cmd)}")
+    return subprocess.Popen(
+        cmd,
+        cwd=repo_root,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+
+def _controller_process_exists() -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "gradient_os.run_controller"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def ensure_controller(args: argparse.Namespace) -> None:
+    if _probe_controller(args.host, args.port):
+        print(f"Controller is responding on {args.host}:{args.port}.")
+        return
+
+    if args.no_start_controller:
+        raise RuntimeError(f"Controller is not responding on {args.host}:{args.port}.")
+
+    proc = _start_controller(args)
+    deadline = time.monotonic() + max(0.0, args.controller_timeout)
+    while time.monotonic() < deadline:
+        if _probe_controller(args.host, args.port):
+            setattr(args, "_controller_started", True)
+            print(f"Controller started and is responding on {args.host}:{args.port}.")
+            return
+        exit_code = proc.poll()
+        if exit_code is not None:
+            raise RuntimeError(f"Controller exited during startup with status {exit_code}.")
+        time.sleep(0.25)
+
+    raise RuntimeError(
+        f"Controller did not respond within {args.controller_timeout:g}s after launch."
+    )
+
+
+def send_commands(joints: list[int], args: argparse.Namespace) -> None:
+    commands = [f"SET_ZERO,{joint}" for joint in joints]
+
+    if args.dry_run:
+        for command in commands:
+            print(command)
+        return
+
+    family, socktype, proto, sockaddr = _udp_address(args.host, args.port)
+    with socket.socket(family, socktype, proto) as sock:
+        for command in commands:
+            sock.sendto(command.encode("utf-8"), sockaddr)
+            print(f"Sent: {command}")
+            time.sleep(max(0.0, args.delay))
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        joints = selected_joints(args)
+        confirm(joints, args)
+        if not args.dry_run:
+            ensure_controller(args)
+        send_commands(joints, args)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.dry_run:
+        if getattr(args, "_controller_started", False):
+            print("Done. Controller was auto-started in the background.")
+        else:
+            print("Done. Check the controller logs for per-servo calibration results.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

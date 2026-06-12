@@ -1,7 +1,13 @@
+import json
+
+import numpy as np
+
 from gradient_os.arm_controller import utils
 from gradient_os.run_controller import (
+    _close_jsonl_diagnostics,
     _configure_startup_diagnostics,
     _validate_real_servo_startup,
+    _write_telemetry_diagnostic,
 )
 
 
@@ -40,3 +46,20 @@ def test_startup_diagnostics_env_toggles_controller_state(monkeypatch):
     finally:
         utils.trajectory_state.clear()
         utils.trajectory_state.update(original_state)
+
+
+def test_telemetry_diagnostic_writer_uses_session_path(monkeypatch, tmp_path):
+    log_path = tmp_path / "controller-telemetry.jsonl"
+    monkeypatch.setenv("GRADIENT_DIAGNOSTIC_SESSION_ID", "test-session")
+    monkeypatch.setenv("GRADIENT_TELEMETRY_DIAGNOSTIC_LOG", str(log_path))
+
+    try:
+        _write_telemetry_diagnostic("telemetry_tick", joints=np.array([1.0, 2.0]), joint_read_ms=0.5)
+    finally:
+        _close_jsonl_diagnostics()
+
+    record = json.loads(log_path.read_text().strip())
+    assert record["event"] == "telemetry_tick"
+    assert record["session_id"] == "test-session"
+    assert record["joints"] == [1.0, 2.0]
+    assert record["joint_read_ms"] == 0.5

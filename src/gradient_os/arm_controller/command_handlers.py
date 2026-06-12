@@ -1175,7 +1175,6 @@ MAX_JOG_ANGULAR_DEG_S = 180.0 # Safety cap per-axis
 MAX_GRIPPER_JOG_DEG_S = 90.0 # Safety cap for gripper rotation rate
 JOG_LINEAR_HOLD_EPS_M_S = 1e-5
 JOG_ANGULAR_HOLD_EPS_DEG_S = 0.02
-JOG_DIAG_SERVO_SAMPLE_INTERVAL = 5
 VALID_JOG_MODES = {"velocity_jog", "absolute_pose"}
 DEFAULT_JOG_MODE = os.getenv("GRADIENT_TELEOP_MODE", "velocity_jog").strip().lower()
 if DEFAULT_JOG_MODE not in VALID_JOG_MODES:
@@ -1613,14 +1612,7 @@ def _jog_controller_thread():
                     continue
 
                 actuators.set_joint_positions(q_clamped, JOG_SERVO_SPEED_REGISTER, 0)
-                actual_angles = None
-                diag_count = int(utils.trajectory_state.get("jog_diag_sample_count", 0)) + 1
-                utils.trajectory_state["jog_diag_sample_count"] = diag_count
-                if mode == "absolute_pose" or (
-                    utils.trajectory_state.get("jog_debug", False)
-                    and diag_count % JOG_DIAG_SERVO_SAMPLE_INTERVAL == 0
-                ):
-                    actual_angles = actuators.get_joint_positions(verbose=False)
+                actual_angles = measured_q if measured_q is not None else None
                 _write_jog_diag(
                     "ik_step",
                     current_position_m=current_position,
@@ -1638,8 +1630,6 @@ def _jog_controller_thread():
                     solve_time_ms=solve_time_ms,
                     teleop_mode=mode,
                 )
-                if actual_angles is not None:
-                    q_current = actual_angles
                 pose_error = target_position - current_position
                 orientation_error_deg = np.rad2deg(
                     R.from_matrix(target_orientation @ current_orientation.T).as_rotvec()
@@ -1670,9 +1660,7 @@ def _jog_controller_thread():
             # If IK fails, we don't command anything and just try again next cycle.
             # This can happen if the target is unreachable.
             print("[Jog] WARNING: IK solution not found for step.")
-            actual_angles = None
-            if utils.trajectory_state.get("jog_debug", False):
-                actual_angles = actuators.get_joint_positions(verbose=False)
+            actual_angles = measured_q if measured_q is not None else None
             _write_jog_diag(
                 "ik_failed",
                 current_position_m=current_position,
