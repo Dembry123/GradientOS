@@ -193,3 +193,50 @@ def test_jog_debug_writes_diagnostic_record_for_ik_failure(monkeypatch, tmp_path
     assert failure["q_current_rad"] == pytest.approx([0.0] * 6)
     assert failure["actual_joint_angles_rad"] == pytest.approx([0.0] * 6)
     assert failure["teleop_mode"] == "absolute_pose"
+    assert failure["position_read_ms"] >= 0.0
+    assert failure["loop_body_ms"] >= failure["position_read_ms"]
+    assert failure["planned_sleep_ms"] >= 0.0
+    assert failure["serial_io_event_count"] == 0
+    assert failure["serial_io_events"] == []
+
+
+def test_jog_debug_writes_diagnostic_record_for_holding_loop(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    command_handlers.utils.trajectory_state["is_jogging"] = True
+    command_handlers.utils.trajectory_state["is_running"] = False
+    command_handlers.utils.trajectory_state["jog_deadman"] = True
+    command_handlers.utils.trajectory_state["jog_debug"] = True
+    command_handlers.utils.trajectory_state["jog_mode"] = "velocity_jog"
+    command_handlers.utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
+    command_handlers.utils.trajectory_state["last_jog_command_time"] = command_handlers.time.monotonic()
+    command_handlers.utils.trajectory_state["last_jog_target_time"] = 0.0
+    command_handlers.utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    command_handlers.utils.trajectory_state["jog_thread"] = None
+
+    read_count = 0
+
+    def get_joint_positions(verbose=False):
+        nonlocal read_count
+        read_count += 1
+        if read_count >= 2:
+            command_handlers.utils.trajectory_state["is_jogging"] = False
+        return np.zeros(6)
+
+    monkeypatch.setattr(command_handlers.actuators, "get_joint_positions", get_joint_positions)
+    monkeypatch.setattr(command_handlers.ik_solver, "get_fk_matrix", lambda q: np.eye(4))
+    monkeypatch.setattr(command_handlers.time, "sleep", lambda seconds: None)
+
+    command_handlers._jog_controller_thread()
+    command_handlers._close_jog_diag_log()
+
+    diag_files = list((tmp_path / "diagnostics" / "jog_motion").glob("jog_motion_*.jsonl"))
+    assert len(diag_files) == 1
+    records = [json.loads(line) for line in diag_files[0].read_text().splitlines()]
+
+    assert len(records) == 1
+    holding = records[0]
+    assert holding["event"] == "holding"
+    assert holding["reason"] == "zero velocity command"
+    assert holding["dt_s"] >= 0.0
+    assert holding["position_read_ms"] >= 0.0
+    assert holding["loop_body_ms"] >= holding["position_read_ms"]

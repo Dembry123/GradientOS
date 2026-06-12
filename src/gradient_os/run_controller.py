@@ -450,17 +450,7 @@ Examples:
         def _telemetry_loop():
             period = 1.0 / max(1, int(telemetry_hz))
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            last_extra_ts = 0.0  # throttle extended servo telemetry to ~2 Hz
             telemetry_sequence = 0
-            
-            try:
-                telemetry_blocks = backend_registry.get_telemetry_blocks()
-            except Exception as exc:
-                telemetry_blocks = []
-                _write_telemetry_diagnostic(
-                    "telemetry_blocks_unavailable",
-                    error=repr(exc),
-                )
 
             _write_telemetry_diagnostic(
                 "telemetry_thread_start",
@@ -469,10 +459,7 @@ Examples:
                 period_s=period,
                 servo_backend=servo_backend,
                 robot=selected_robot.name,
-                telemetry_blocks=[
-                    {"address": int(addr), "length": int(length)}
-                    for addr, length in telemetry_blocks
-                ],
+                telemetry_blocks=[],
             )
             
             while not telemetry_stop_event.is_set():
@@ -480,6 +467,10 @@ Examples:
                 loop_start_perf = time.perf_counter()
                 loop_start_wall = time.time()
                 joint_read_ms = None
+                measured_joint_age_s = None
+                measured_joint_source = None
+                measured_joint_updated_at = None
+                measured_joint_valid = False
                 send_ms = None
                 payload_bytes = 0
                 q = None
@@ -488,8 +479,17 @@ Examples:
                 alerts_count = 0
                 try:
                     read_start = time.perf_counter()
-                    q = actuators.get_joint_positions(verbose=False)
+                    measured_snapshot = utils.get_latest_measured_joint_snapshot()
                     joint_read_ms = (time.perf_counter() - read_start) * 1000.0
+                    measured_joint_valid = bool(measured_snapshot.get("valid"))
+                    measured_joint_age_s = measured_snapshot.get("age_s")
+                    measured_joint_source = measured_snapshot.get("source")
+                    measured_joint_updated_at = measured_snapshot.get("updated_at")
+                    snapshot_joints = measured_snapshot.get("joints")
+                    q = list(snapshot_joints) if isinstance(snapshot_joints, list) else []
+                    if not q:
+                        q = list(utils.current_logical_joint_angles_rad)
+                        measured_joint_source = "legacy_current_fallback"
                     g = utils.current_gripper_angle_rad if utils.gripper_present else None
                     msg: dict[str, object] = {"t": time.time(), "joints": [float(x) for x in q]}
                     if g is not None:
@@ -501,63 +501,6 @@ Examples:
                     jog_ik_status = utils.trajectory_state.get("jog_ik_status")
                     if isinstance(jog_ik_status, dict):
                         msg["jog_ik"] = dict(jog_ik_status)
-                    
-                    # --- Servo telemetry (voltage/temp/current/torque + alarms) ---
-                    now = time.time()
-                    if now - last_extra_ts >= 0.5:
-                        last_extra_ts = now
-                        try:
-                            present_ids = sorted(actuators.get_present_actuator_ids())
-                            
-                            if present_ids and telemetry_blocks:
-                                # Read telemetry blocks using backend-defined addresses
-                                block_data = []
-                                for block_index, (addr, length) in enumerate(telemetry_blocks):
-                                    block_start = time.perf_counter()
-                                    raw_block = actuators.sync_read_block(
-                                        present_ids,
-                                        start_address=addr,
-                                        data_len=length,
-                                        timeout_s=0.05,
-                                        diagnostics=False,
-                                    )
-                                    block_ms = (time.perf_counter() - block_start) * 1000.0
-                                    block_data.append(raw_block)
-                                    extra_block_reads.append(
-                                        {
-                                            "block_index": block_index,
-                                            "address": int(addr),
-                                            "length": int(length),
-                                            "duration_ms": block_ms,
-                                            "present_ids": present_ids,
-                                            "response_ids": sorted(int(sid) for sid in raw_block.keys()),
-                                        }
-                                    )
-                                
-                                servos: dict[str, dict[str, object]] = {}
-                                for sid in present_ids:
-                                    sample: dict[str, object] = {}
-                                    
-                                    # Parse each block using backend-specific parsing
-                                    for block_idx, raw_block in enumerate(block_data):
-                                        data = raw_block.get(sid)
-                                        if data:
-                                            parsed = backend_registry.parse_telemetry_block(block_idx, data)
-                                            sample.update(parsed)
-                                    
-                                    if sample:
-                                        servos[str(sid)] = sample
-                                
-                                if servos:
-                                    msg["servos"] = servos
-                        except Exception as exc:
-                            _write_telemetry_diagnostic(
-                                "telemetry_extra_blocks_error",
-                                sequence=telemetry_sequence,
-                                error=repr(exc),
-                            )
-                            # Do not let telemetry extras break the main joints stream
-                            pass
                     
                     # Drain any alerts collected by lower layers and attach them
                     try:
@@ -592,10 +535,14 @@ Examples:
                         joint_read_ms=joint_read_ms,
                         joints=[float(x) for x in q] if q is not None else None,
                         joint_count=len(q) if q is not None else 0,
+                        measured_joint_age_s=measured_joint_age_s,
+                        measured_joint_source=measured_joint_source,
+                        measured_joint_updated_at=measured_joint_updated_at,
+                        measured_joint_valid=measured_joint_valid,
                         gripper=float(g) if g is not None else None,
                         jog_ik=_summarize_jog_ik_status(jog_ik_status),
                         servo_block_reads=extra_block_reads,
-                        servo_payload_ids=sorted(msg.get("servos", {}).keys()) if isinstance(msg.get("servos"), dict) else [],
+                        servo_payload_ids=[],
                         alerts_count=alerts_count,
                         payload_bytes=payload_bytes,
                         send_ms=send_ms,

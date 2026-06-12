@@ -45,6 +45,7 @@ Options:
   --hebi-dry-run                Shortcut for --hebi-live=false
   --diagnostic-logging=true|false
                                 Enable controller and bridge diagnostic logs (default: false)
+  --diagnostic                  Shortcut for --diagnostic-logging=true
   --diagnostics                 Shortcut for --diagnostic-logging=true
   --no-diagnostics              Shortcut for --diagnostic-logging=false
   -h, --help                    Show this help
@@ -118,13 +119,13 @@ for arg in "$@"; do
     --hebi-dry-run)
       HEBI_LIVE=false
       ;;
-    --diagnostics|--diagnostic-logging|--diagnostic-log)
+    --diagnostic|--diagnostics|--diagnostic-logging|--diagnostic-log)
       DIAGNOSTIC_LOGGING=true
       ;;
-    --no-diagnostics|--no-diagnostic-logging|--no-diagnostic-log)
+    --no-diagnostic|--no-diagnostics|--no-diagnostic-logging|--no-diagnostic-log)
       DIAGNOSTIC_LOGGING=false
       ;;
-    --diagnostics=*|--diagnostic-logging=*|--diagnostic-log=*)
+    --diagnostic=*|--diagnostics=*|--diagnostic-logging=*|--diagnostic-log=*)
       DIAGNOSTIC_LOGGING="$(parse_bool "${arg#*=}")"
       ;;
     *)

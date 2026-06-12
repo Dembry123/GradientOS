@@ -77,6 +77,7 @@ def get_joint_positions(verbose: bool = True) -> list[float]:
 
     positions = backend.get_joint_positions(verbose=verbose)
     utils.current_logical_joint_angles_rad = list(positions)
+    utils.update_latest_measured_joint_angles(positions, source="actuator_runtime.get_joint_positions")
 
     if verbose:
         angles_deg = np.rad2deg(positions)
@@ -120,6 +121,7 @@ def raw_to_joint_positions(raw_positions: dict[int, int]) -> list[float]:
         return list(utils.current_logical_joint_angles_rad)
     positions = backend.raw_to_joint_positions(raw_positions)
     utils.current_logical_joint_angles_rad = list(positions)
+    utils.update_latest_measured_joint_angles(positions, source="actuator_runtime.raw_to_joint_positions")
     return positions
 
 
@@ -229,6 +231,20 @@ def get_sync_profiles() -> list[tuple[float, float, float]]:
     if backend is None or not hasattr(backend, "get_sync_profiles"):
         return []
     return backend.get_sync_profiles()  # type: ignore[attr-defined]
+
+
+def set_io_diagnostics_enabled(enabled: bool) -> None:
+    backend = get_initialized_backend()
+    if backend is None or not hasattr(backend, "set_io_diagnostics_enabled"):
+        return
+    backend.set_io_diagnostics_enabled(bool(enabled))  # type: ignore[attr-defined]
+
+
+def drain_io_diagnostics() -> list[dict]:
+    backend = get_initialized_backend()
+    if backend is None or not hasattr(backend, "drain_io_diagnostics"):
+        return []
+    return backend.drain_io_diagnostics()  # type: ignore[attr-defined]
 
 
 def read_hardware_zero_offsets(

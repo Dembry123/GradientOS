@@ -13,6 +13,8 @@
 
 import math
 import os
+import threading
+import time
 import numpy as np
 
 # Import robot configuration for backward compatibility
@@ -292,6 +294,14 @@ ser: 'serial.Serial | None' = None
 # the robot configuration is set. Code should check len() before accessing.
 current_logical_joint_angles_rad: list[float] = []
 
+# Measured-only joint snapshot for telemetry. Unlike
+# current_logical_joint_angles_rad, command writes must not update this cache.
+_measured_joint_snapshot_lock = threading.Lock()
+latest_measured_joint_angles_rad: list[float] = []
+latest_measured_joint_angles_monotonic: float = 0.0
+latest_measured_joint_angles_wall_time: float = 0.0
+latest_measured_joint_angles_source: str = "unset"
+
 # Global state for the gripper's last known angle (in radians)
 current_gripper_angle_rad = 0.0
 
@@ -310,6 +320,10 @@ def _populate_robot_constants() -> None:
     distinct from servo-specific constants which are populated by _populate_servo_constants().
     """
     global current_logical_joint_angles_rad
+    global latest_measured_joint_angles_rad
+    global latest_measured_joint_angles_monotonic
+    global latest_measured_joint_angles_wall_time
+    global latest_measured_joint_angles_source
     global NUM_LOGICAL_JOINTS, NUM_PHYSICAL_SERVOS, SERVO_IDS
     global SERVO_ID_GRIPPER, SERVO_ID_JOINT_2_SECOND, SERVO_ID_JOINT_3_SECOND
     global URDF_JOINT_LIMITS, EFFECTIVE_MAPPING_RANGES, INVERTED_SERVO_IDS
@@ -361,6 +375,51 @@ def _populate_robot_constants() -> None:
     n_joints = NUM_LOGICAL_JOINTS
     if n_joints is not None and len(current_logical_joint_angles_rad) != n_joints:
         current_logical_joint_angles_rad = [0.0] * n_joints
+    with _measured_joint_snapshot_lock:
+        if n_joints is not None and len(latest_measured_joint_angles_rad) != n_joints:
+            latest_measured_joint_angles_rad = []
+            latest_measured_joint_angles_monotonic = 0.0
+            latest_measured_joint_angles_wall_time = 0.0
+            latest_measured_joint_angles_source = "unset"
+
+
+def update_latest_measured_joint_angles(
+    positions_rad: list[float] | tuple[float, ...],
+    *,
+    source: str,
+) -> list[float]:
+    """Update the measured-only joint snapshot after a real backend read."""
+    global latest_measured_joint_angles_rad
+    global latest_measured_joint_angles_monotonic
+    global latest_measured_joint_angles_wall_time
+    global latest_measured_joint_angles_source
+
+    positions = [float(value) for value in positions_rad]
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    with _measured_joint_snapshot_lock:
+        latest_measured_joint_angles_rad = positions
+        latest_measured_joint_angles_monotonic = now_mono
+        latest_measured_joint_angles_wall_time = now_wall
+        latest_measured_joint_angles_source = str(source)
+    return positions
+
+
+def get_latest_measured_joint_snapshot() -> dict[str, object]:
+    """Return a JSON-ready snapshot of the latest measured joint positions."""
+    now_mono = time.monotonic()
+    with _measured_joint_snapshot_lock:
+        joints = list(latest_measured_joint_angles_rad)
+        updated_mono = latest_measured_joint_angles_monotonic
+        updated_wall = latest_measured_joint_angles_wall_time
+        source = latest_measured_joint_angles_source
+    return {
+        "joints": joints,
+        "valid": bool(joints) and updated_mono > 0.0,
+        "updated_at": updated_wall if updated_wall > 0.0 else None,
+        "age_s": (now_mono - updated_mono) if updated_mono > 0.0 else None,
+        "source": source,
+    }
 
 
 # Keep old name as alias for backward compatibility during migration

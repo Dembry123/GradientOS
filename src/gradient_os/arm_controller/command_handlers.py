@@ -1261,6 +1261,42 @@ def _write_jog_diag(event: str, *, force: bool = False, **fields) -> None:
         print(f"[Jog] WARNING: Failed to write diagnostic log: {exc}")
 
 
+def _set_jog_serial_io_diagnostics(enabled: bool) -> None:
+    try:
+        actuators.set_io_diagnostics_enabled(bool(enabled))
+    except Exception as exc:
+        print(f"[Jog] WARNING: Failed to set serial I/O diagnostics: {exc}")
+
+
+def _drain_jog_serial_io_diagnostics() -> list[dict]:
+    try:
+        return actuators.drain_io_diagnostics()
+    except Exception as exc:
+        print(f"[Jog] WARNING: Failed to drain serial I/O diagnostics: {exc}")
+        return []
+
+
+def _jog_loop_timing_fields(
+    loop_start_time: float,
+    *,
+    position_read_ms: float | None = None,
+    arm_write_ms: float | None = None,
+    gripper_write_ms: float | None = None,
+) -> dict:
+    loop_body_ms = (time.monotonic() - loop_start_time) * 1000.0
+    planned_sleep_ms = max(0.0, (1.0 / JOG_CONTROL_FREQUENCY_HZ) - (loop_body_ms / 1000.0)) * 1000.0
+    serial_io_events = _drain_jog_serial_io_diagnostics()
+    return {
+        "position_read_ms": position_read_ms,
+        "arm_write_ms": arm_write_ms,
+        "gripper_write_ms": gripper_write_ms,
+        "loop_body_ms": loop_body_ms,
+        "planned_sleep_ms": planned_sleep_ms,
+        "serial_io_event_count": len(serial_io_events),
+        "serial_io_events": serial_io_events,
+    }
+
+
 def _nearest_limited_joint_target(q_current, q_target):
     q_current_arr = np.asarray(q_current, dtype=float)
     q_target_arr = np.asarray(q_target, dtype=float)
@@ -1383,9 +1419,14 @@ def _jog_controller_thread():
     latest velocity commands stored in the global trajectory_state.
     """
     print("[Jog] Jog controller thread started.")
+    if utils.trajectory_state.get("jog_debug", False):
+        _set_jog_serial_io_diagnostics(True)
+        _drain_jog_serial_io_diagnostics()
     
     # Get initial state
     q_current = actuators.get_joint_positions(verbose=False)
+    if utils.trajectory_state.get("jog_debug", False):
+        _drain_jog_serial_io_diagnostics()
     
     last_loop_time = time.monotonic()
     
@@ -1397,6 +1438,9 @@ def _jog_controller_thread():
         loop_start_time = time.monotonic()
         dt = loop_start_time - last_loop_time
         last_loop_time = loop_start_time
+        position_read_ms = None
+        arm_write_ms = None
+        gripper_write_ms = None
 
         # If a non-jog motion starts, pause jogging to avoid fighting other controllers.
         # When the motion ends, resync q_current from the physical robot so we do not
@@ -1404,21 +1448,48 @@ def _jog_controller_thread():
         if utils.trajectory_state.get("is_running"):
             _update_jog_ik_status("paused", "non-jog motion active")
             was_paused_for_motion = True
+            _write_jog_diag(
+                "paused",
+                dt_s=dt,
+                teleop_mode=_active_jog_mode(),
+                **_jog_loop_timing_fields(
+                    loop_start_time,
+                    position_read_ms=position_read_ms,
+                    arm_write_ms=arm_write_ms,
+                    gripper_write_ms=gripper_write_ms,
+                ),
+            )
             loop_duration = time.monotonic() - loop_start_time
             sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
             if sleep_time > 0:
                 time.sleep(sleep_time)
             continue
         elif was_paused_for_motion:
+            position_read_start = time.perf_counter()
             fresh_q = actuators.get_joint_positions(verbose=False)
+            position_read_ms = (time.perf_counter() - position_read_start) * 1000.0
             if fresh_q is not None:
                 q_current = fresh_q
             last_loop_time = time.monotonic()
             was_paused_for_motion = False
+            _write_jog_diag(
+                "resynced_after_motion",
+                dt_s=dt,
+                q_current_rad=q_current,
+                teleop_mode=_active_jog_mode(),
+                **_jog_loop_timing_fields(
+                    loop_start_time,
+                    position_read_ms=position_read_ms,
+                    arm_write_ms=arm_write_ms,
+                    gripper_write_ms=gripper_write_ms,
+                ),
+            )
             continue
 
         mode = _active_jog_mode()
+        position_read_start = time.perf_counter()
         measured_q = actuators.get_joint_positions(verbose=False)
+        position_read_ms = (time.perf_counter() - position_read_start) * 1000.0
         if measured_q is not None:
             q_current = measured_q
 
@@ -1457,6 +1528,20 @@ def _jog_controller_thread():
         if current_pose_matrix is None:
             print("[Jog] ERROR: FK failed during jog loop. Stopping.")
             _update_jog_ik_status("fk_failed", "FK failed for current jog state")
+            _write_jog_diag(
+                "fk_failed",
+                q_current_rad=q_current,
+                dt_s=dt,
+                command_age_s=time_since_last_cmd,
+                target_age_s=time_since_last_target,
+                teleop_mode=mode,
+                **_jog_loop_timing_fields(
+                    loop_start_time,
+                    position_read_ms=position_read_ms,
+                    arm_write_ms=arm_write_ms,
+                    gripper_write_ms=gripper_write_ms,
+                ),
+            )
             break
         
         current_position = current_pose_matrix[:3, 3]
@@ -1521,15 +1606,37 @@ def _jog_controller_thread():
         gripper_rate_deg_s = float(utils.trajectory_state.get("jog_gripper_velocity_deg_s", 0.0))
         has_gripper_motion_command = abs(gripper_rate_deg_s) > 1e-3
         if not deadman_held or (not has_arm_motion_command and not has_gripper_motion_command):
+            hold_status = "deadman_released" if not deadman_held else "holding"
+            hold_reason = "deadman released" if not deadman_held else (
+                "waiting for absolute target pose" if mode == "absolute_pose" else "zero velocity command"
+            )
             _update_jog_ik_status(
-                "deadman_released" if not deadman_held else "holding",
-                "deadman released" if not deadman_held else (
-                    "waiting for absolute target pose" if mode == "absolute_pose" else "zero velocity command"
-                ),
+                hold_status,
+                hold_reason,
                 command_linear_m_s=linear_vel,
                 command_angular_deg_s=angular_deg_s,
                 command_age_s=time_since_last_cmd,
                 target_age_s=target_age_s,
+            )
+            _write_jog_diag(
+                hold_status,
+                reason=hold_reason,
+                current_position_m=current_position,
+                command_linear_m_s=linear_vel,
+                command_angular_deg_s=angular_deg_s,
+                gripper_rate_deg_s=gripper_rate_deg_s,
+                q_current_rad=q_current,
+                actual_joint_angles_rad=measured_q if measured_q is not None else None,
+                dt_s=dt,
+                command_age_s=time_since_last_cmd,
+                target_age_s=target_age_s,
+                teleop_mode=mode,
+                **_jog_loop_timing_fields(
+                    loop_start_time,
+                    position_read_ms=position_read_ms,
+                    arm_write_ms=arm_write_ms,
+                    gripper_write_ms=gripper_write_ms,
+                ),
             )
             loop_duration = time.monotonic() - loop_start_time
             sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
@@ -1537,8 +1644,11 @@ def _jog_controller_thread():
                 time.sleep(sleep_time)
             continue
 
+        gripper_applied = False
         if has_gripper_motion_command:
-            _apply_jog_gripper_velocity(dt)
+            gripper_write_start = time.perf_counter()
+            gripper_applied = _apply_jog_gripper_velocity(dt)
+            gripper_write_ms = (time.perf_counter() - gripper_write_start) * 1000.0
 
         if not has_arm_motion_command:
             _update_jog_ik_status(
@@ -1547,6 +1657,27 @@ def _jog_controller_thread():
                 command_linear_m_s=linear_vel,
                 command_angular_deg_s=angular_deg_s,
                 command_age_s=time_since_last_cmd,
+            )
+            _write_jog_diag(
+                "gripper_step",
+                reason="gripper-only jog; arm command held",
+                current_position_m=current_position,
+                command_linear_m_s=linear_vel,
+                command_angular_deg_s=angular_deg_s,
+                gripper_rate_deg_s=gripper_rate_deg_s,
+                gripper_applied=gripper_applied,
+                q_current_rad=q_current,
+                actual_joint_angles_rad=measured_q if measured_q is not None else None,
+                dt_s=dt,
+                command_age_s=time_since_last_cmd,
+                target_age_s=target_age_s,
+                teleop_mode=mode,
+                **_jog_loop_timing_fields(
+                    loop_start_time,
+                    position_read_ms=position_read_ms,
+                    arm_write_ms=arm_write_ms,
+                    gripper_write_ms=gripper_write_ms,
+                ),
             )
             loop_duration = time.monotonic() - loop_start_time
             sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
@@ -1605,13 +1736,41 @@ def _jog_controller_thread():
                         "jog stopped before servo command",
                         command_age_s=time_since_last_cmd,
                     )
+                    _write_jog_diag(
+                        "command_cancelled",
+                        reason="jog stopped before servo command",
+                        current_position_m=current_position,
+                        target_position_m=target_position,
+                        command_linear_m_s=linear_vel,
+                        command_angular_deg_s=angular_deg_s,
+                        gripper_rate_deg_s=gripper_rate_deg_s,
+                        gripper_applied=gripper_applied,
+                        q_current_rad=q_current,
+                        q_target_raw_rad=q_target,
+                        q_target_limited_rad=q_clamped,
+                        q_delta_rad=q_delta,
+                        actual_joint_angles_rad=measured_q if measured_q is not None else None,
+                        dt_s=dt,
+                        command_age_s=time_since_last_cmd,
+                        target_age_s=target_age_s,
+                        solve_time_ms=solve_time_ms,
+                        teleop_mode=mode,
+                        **_jog_loop_timing_fields(
+                            loop_start_time,
+                            position_read_ms=position_read_ms,
+                            arm_write_ms=arm_write_ms,
+                            gripper_write_ms=gripper_write_ms,
+                        ),
+                    )
                     loop_duration = time.monotonic() - loop_start_time
                     sleep_time = (1.0 / JOG_CONTROL_FREQUENCY_HZ) - loop_duration
                     if sleep_time > 0:
                         time.sleep(sleep_time)
                     continue
 
+                arm_write_start = time.perf_counter()
                 actuators.set_joint_positions(q_clamped, JOG_SERVO_SPEED_REGISTER, 0)
+                arm_write_ms = (time.perf_counter() - arm_write_start) * 1000.0
                 actual_angles = measured_q if measured_q is not None else None
                 _write_jog_diag(
                     "ik_step",
@@ -1619,6 +1778,8 @@ def _jog_controller_thread():
                     target_position_m=target_position,
                     command_linear_m_s=linear_vel,
                     command_angular_deg_s=angular_deg_s,
+                    gripper_rate_deg_s=gripper_rate_deg_s,
+                    gripper_applied=gripper_applied,
                     q_current_rad=q_current,
                     q_target_raw_rad=q_target,
                     q_target_limited_rad=q_clamped,
@@ -1629,6 +1790,12 @@ def _jog_controller_thread():
                     target_age_s=target_age_s,
                     solve_time_ms=solve_time_ms,
                     teleop_mode=mode,
+                    **_jog_loop_timing_fields(
+                        loop_start_time,
+                        position_read_ms=position_read_ms,
+                        arm_write_ms=arm_write_ms,
+                        gripper_write_ms=gripper_write_ms,
+                    ),
                 )
                 pose_error = target_position - current_position
                 orientation_error_deg = np.rad2deg(
@@ -1656,6 +1823,30 @@ def _jog_controller_thread():
             except Exception as e:
                 print(f"[Jog] WARNING: Failed to clamp/apply joint limits: {e}")
                 _update_jog_ik_status("apply_failed", str(e))
+                _write_jog_diag(
+                    "apply_failed",
+                    reason=str(e),
+                    current_position_m=current_position,
+                    target_position_m=target_position,
+                    command_linear_m_s=linear_vel,
+                    command_angular_deg_s=angular_deg_s,
+                    gripper_rate_deg_s=gripper_rate_deg_s,
+                    gripper_applied=gripper_applied,
+                    q_current_rad=q_current,
+                    q_target_raw_rad=q_target,
+                    actual_joint_angles_rad=measured_q if measured_q is not None else None,
+                    dt_s=dt,
+                    command_age_s=time_since_last_cmd,
+                    target_age_s=target_age_s,
+                    solve_time_ms=solve_time_ms,
+                    teleop_mode=mode,
+                    **_jog_loop_timing_fields(
+                        loop_start_time,
+                        position_read_ms=position_read_ms,
+                        arm_write_ms=arm_write_ms,
+                        gripper_write_ms=gripper_write_ms,
+                    ),
+                )
         else:
             # If IK fails, we don't command anything and just try again next cycle.
             # This can happen if the target is unreachable.
@@ -1667,6 +1858,8 @@ def _jog_controller_thread():
                 target_position_m=target_position,
                 command_linear_m_s=linear_vel,
                 command_angular_deg_s=angular_deg_s,
+                gripper_rate_deg_s=gripper_rate_deg_s,
+                gripper_applied=gripper_applied,
                 q_current_rad=q_current,
                 actual_joint_angles_rad=actual_angles,
                 dt_s=dt,
@@ -1674,6 +1867,12 @@ def _jog_controller_thread():
                 target_age_s=target_age_s,
                 solve_time_ms=solve_time_ms,
                 teleop_mode=mode,
+                **_jog_loop_timing_fields(
+                    loop_start_time,
+                    position_read_ms=position_read_ms,
+                    arm_write_ms=arm_write_ms,
+                    gripper_write_ms=gripper_write_ms,
+                ),
             )
             _update_jog_ik_status(
                 "ik_failed",
@@ -1703,6 +1902,7 @@ def _jog_controller_thread():
             last_status_log_time = now
 
     print("[Jog] Jog controller thread stopped.")
+    _set_jog_serial_io_diagnostics(False)
     # Ensure global state reflects the jog thread is no longer active.
     utils.trajectory_state["is_jogging"] = False
     if utils.trajectory_state.get("jog_thread") is threading.current_thread():
@@ -1761,6 +1961,10 @@ def handle_jog_start(mode: str | None = None):
     utils.trajectory_state["jog_target_orientation_matrix"] = None
     utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
     utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    if utils.trajectory_state.get("jog_debug", False):
+        _ensure_jog_diag_log()
+        _set_jog_serial_io_diagnostics(True)
+        _drain_jog_serial_io_diagnostics()
     _update_jog_ik_status("starting", "jog start requested", teleop_mode=selected_mode)
 
     jog_thread = threading.Thread(target=_jog_controller_thread, daemon=True)
@@ -1778,6 +1982,7 @@ def handle_jog_stop():
     utils.trajectory_state["jog_target_orientation_matrix"] = None
 
     _brake_to_current_position("jog stop")
+    _set_jog_serial_io_diagnostics(False)
     _close_jog_diag_log()
     
     print("[Jog] Jog mode stopped.")
@@ -1819,7 +2024,11 @@ def handle_set_jog_debug(enabled: bool):
     utils.trajectory_state["jog_debug"] = bool(enabled)
     if enabled:
         _ensure_jog_diag_log()
+        if utils.trajectory_state.get("is_jogging", False):
+            _set_jog_serial_io_diagnostics(True)
+            _drain_jog_serial_io_diagnostics()
     else:
+        _set_jog_serial_io_diagnostics(False)
         _close_jog_diag_log()
     print(f"[Jog] Debug logging set to {enabled}")
 

@@ -10,7 +10,8 @@
 
 import time
 import threading
-from typing import Optional, Callable
+from collections import deque
+from typing import Any, Optional, Callable
 import serial
 
 from . import config
@@ -24,6 +25,11 @@ _SERIAL_LOCK = threading.RLock()
 
 # Telemetry buffer for Sync Read profiling (write, read, parse durations in seconds)
 _sync_profiles: list[tuple[float, float, float]] = []
+
+# Bounded serial I/O timing buffer used by realtime jog diagnostics.
+_io_diag_enabled = False
+_io_diag_events: deque[dict[str, Any]] = deque(maxlen=4096)
+_io_diag_lock = threading.Lock()
 
 # Cache of detected servo IDs (populated by ping operations)
 _present_servo_ids: set[int] = set()
@@ -61,6 +67,34 @@ def get_sync_profiles() -> list[tuple[float, float, float]]:
     out = _sync_profiles[:]
     _sync_profiles.clear()
     return out
+
+
+def set_io_diagnostics_enabled(enabled: bool) -> None:
+    """Enable bounded low-level serial timing capture for jog diagnostics."""
+    global _io_diag_enabled
+    _io_diag_enabled = bool(enabled)
+    if not enabled:
+        drain_io_diagnostics()
+
+
+def drain_io_diagnostics() -> list[dict[str, Any]]:
+    """Return and clear collected serial I/O timing events."""
+    with _io_diag_lock:
+        out = list(_io_diag_events)
+        _io_diag_events.clear()
+    return out
+
+
+def _record_io_diagnostic(event: dict[str, Any]) -> None:
+    if not _io_diag_enabled:
+        return
+    payload = {
+        "time": round(time.time(), 6),
+        "thread_id": threading.get_ident(),
+        **event,
+    }
+    with _io_diag_lock:
+        _io_diag_events.append(payload)
 
 
 # =============================================================================
@@ -434,11 +468,39 @@ def sync_write_goal_pos_speed_accel(ser: serial.Serial, servo_data_list: list[tu
     # Calculate checksum (from Broadcast_ID to last data byte)
     packet[idx] = calculate_checksum(packet[2:idx])
 
+    io_diag_active = _io_diag_enabled
+    total_start = time.perf_counter() if io_diag_active else 0.0
+    lock_wait_ms = 0.0
+    write_ms = 0.0
+    error = None
     try:
+        lock_wait_start = time.perf_counter() if io_diag_active else 0.0
         with _SERIAL_LOCK:
+            if io_diag_active:
+                lock_wait_ms = (time.perf_counter() - lock_wait_start) * 1000.0
+                write_start = time.perf_counter()
             ser.write(packet[:idx + 1])
+            if io_diag_active:
+                write_ms = (time.perf_counter() - write_start) * 1000.0
     except Exception as e:
+        error = str(e)
         print(f"[Feetech SyncWrite] Error: {e}")
+    finally:
+        if io_diag_active:
+            event = {
+                "operation": "sync_write_goal_pos_speed_accel",
+                "servo_count": num_servos,
+                "servo_ids": [int(item[0]) for item in servo_data_list],
+                "packet_bytes": idx + 1,
+                "lock_wait_ms": lock_wait_ms,
+                "write_ms": write_ms,
+                "read_ms": 0.0,
+                "parse_ms": 0.0,
+                "total_ms": (time.perf_counter() - total_start) * 1000.0,
+            }
+            if error is not None:
+                event["error"] = error
+            _record_io_diagnostic(event)
 
 
 # =============================================================================
@@ -498,9 +560,19 @@ def sync_read_positions(
 
     bytes_to_read = num_servos * 8  # Each servo sends 8-byte status packet
     original_timeout = None
+    io_diag_active = _io_diag_enabled
+    total_start = time.perf_counter() if io_diag_active else 0.0
+    lock_wait_ms = 0.0
+    write_dur = 0.0
+    read_dur = 0.0
+    parse_dur = 0.0
+    response_data = b""
 
     try:
+        lock_wait_start = time.perf_counter() if io_diag_active else 0.0
         with _SERIAL_LOCK:
+            if io_diag_active:
+                lock_wait_ms = (time.perf_counter() - lock_wait_start) * 1000.0
             if timeout_s is not None:
                 original_timeout = ser.timeout
                 ser.timeout = timeout_s
@@ -558,17 +630,54 @@ def sync_read_positions(
         if diagnostics:
             _sync_profiles.append((write_dur, read_dur, parse_dur))
 
+        missing = sorted(int(sid) for sid in expected_ids)
         if expected_ids:
-            missing = list(expected_ids)
             print(f"[Feetech SyncRead] No response from IDs: {missing}")
             if alert_callback:
                 for sid in missing:
                     alert_callback(sid, -1, ["Timeout"])
 
+        if io_diag_active:
+            _record_io_diagnostic({
+                "operation": "sync_read_positions",
+                "servo_count": num_servos,
+                "servo_ids": [int(sid) for sid in servo_ids],
+                "start_address": int(config.SERVO_ADDR_PRESENT_POSITION),
+                "data_len": 2,
+                "expected_bytes": int(bytes_to_read),
+                "response_bytes": len(response_data),
+                "response_count": len(positions),
+                "missing_ids": missing,
+                "timeout_s": timeout_s,
+                "lock_wait_ms": lock_wait_ms,
+                "write_ms": write_dur * 1000.0,
+                "read_ms": read_dur * 1000.0,
+                "parse_ms": parse_dur * 1000.0,
+                "total_ms": (time.perf_counter() - total_start) * 1000.0,
+            })
         return positions
 
     except Exception as e:
         print(f"[Feetech SyncRead] Error: {e}")
+        if io_diag_active:
+            _record_io_diagnostic({
+                "operation": "sync_read_positions",
+                "servo_count": num_servos,
+                "servo_ids": [int(sid) for sid in servo_ids],
+                "start_address": int(config.SERVO_ADDR_PRESENT_POSITION),
+                "data_len": 2,
+                "expected_bytes": int(bytes_to_read),
+                "response_bytes": len(response_data),
+                "response_count": 0,
+                "missing_ids": [int(sid) for sid in servo_ids],
+                "timeout_s": timeout_s,
+                "lock_wait_ms": lock_wait_ms,
+                "write_ms": write_dur * 1000.0,
+                "read_ms": read_dur * 1000.0,
+                "parse_ms": parse_dur * 1000.0,
+                "total_ms": (time.perf_counter() - total_start) * 1000.0,
+                "error": str(e),
+            })
         return {}
 
 
@@ -615,9 +724,19 @@ def sync_read_block(
     per_packet = 6 + data_len
     bytes_to_read = num_servos * per_packet
     original_timeout = None
+    io_diag_active = _io_diag_enabled
+    total_start = time.perf_counter() if io_diag_active else 0.0
+    lock_wait_ms = 0.0
+    write_dur = 0.0
+    read_dur = 0.0
+    parse_dur = 0.0
+    response_data = b""
 
     try:
+        lock_wait_start = time.perf_counter() if io_diag_active else 0.0
         with _SERIAL_LOCK:
+            if io_diag_active:
+                lock_wait_ms = (time.perf_counter() - lock_wait_start) * 1000.0
             if timeout_s is not None:
                 original_timeout = ser.timeout
                 ser.timeout = timeout_s
@@ -639,6 +758,24 @@ def sync_read_block(
                     ser.timeout = original_timeout
 
         if len(response_data) < per_packet:
+            if io_diag_active:
+                _record_io_diagnostic({
+                    "operation": "sync_read_block",
+                    "servo_count": num_servos,
+                    "servo_ids": [int(sid) for sid in servo_ids],
+                    "start_address": int(start_address),
+                    "data_len": int(data_len),
+                    "expected_bytes": int(bytes_to_read),
+                    "response_bytes": len(response_data),
+                    "response_count": 0,
+                    "missing_ids": [int(sid) for sid in servo_ids],
+                    "timeout_s": timeout_s,
+                    "lock_wait_ms": lock_wait_ms,
+                    "write_ms": write_dur * 1000.0,
+                    "read_ms": read_dur * 1000.0,
+                    "parse_ms": 0.0,
+                    "total_ms": (time.perf_counter() - total_start) * 1000.0,
+                })
             return {}
 
         results: dict[int, bytes] = {}
@@ -664,9 +801,47 @@ def sync_read_block(
         if diagnostics:
             _sync_profiles.append((write_dur, read_dur, parse_dur))
 
+        missing = sorted(int(sid) for sid in expected_ids)
+        if io_diag_active:
+            _record_io_diagnostic({
+                "operation": "sync_read_block",
+                "servo_count": num_servos,
+                "servo_ids": [int(sid) for sid in servo_ids],
+                "start_address": int(start_address),
+                "data_len": int(data_len),
+                "expected_bytes": int(bytes_to_read),
+                "response_bytes": len(response_data),
+                "response_count": len(results),
+                "missing_ids": missing,
+                "timeout_s": timeout_s,
+                "lock_wait_ms": lock_wait_ms,
+                "write_ms": write_dur * 1000.0,
+                "read_ms": read_dur * 1000.0,
+                "parse_ms": parse_dur * 1000.0,
+                "total_ms": (time.perf_counter() - total_start) * 1000.0,
+            })
         return results
     except Exception as e:
         print(f"[Feetech SyncReadBlk] Error: {e}")
+        if io_diag_active:
+            _record_io_diagnostic({
+                "operation": "sync_read_block",
+                "servo_count": num_servos,
+                "servo_ids": [int(sid) for sid in servo_ids],
+                "start_address": int(start_address),
+                "data_len": int(data_len),
+                "expected_bytes": int(bytes_to_read),
+                "response_bytes": len(response_data),
+                "response_count": 0,
+                "missing_ids": [int(sid) for sid in servo_ids],
+                "timeout_s": timeout_s,
+                "lock_wait_ms": lock_wait_ms,
+                "write_ms": write_dur * 1000.0,
+                "read_ms": read_dur * 1000.0,
+                "parse_ms": parse_dur * 1000.0,
+                "total_ms": (time.perf_counter() - total_start) * 1000.0,
+                "error": str(e),
+            })
         return {}
 
 

@@ -410,6 +410,14 @@ class FeetechBackend(ActuatorBackend):
         """Return and clear Feetech sync-read timing diagnostics."""
         return protocol.get_sync_profiles()
 
+    def set_io_diagnostics_enabled(self, enabled: bool) -> None:
+        """Enable/disable low-level serial I/O timing diagnostics."""
+        protocol.set_io_diagnostics_enabled(enabled)
+
+    def drain_io_diagnostics(self) -> list[dict]:
+        """Return and clear low-level serial I/O timing diagnostics."""
+        return protocol.drain_io_diagnostics()
+
     def sync_read_block(
         self,
         servo_ids: list[int],
