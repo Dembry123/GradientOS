@@ -496,29 +496,30 @@ def sync_read_positions(
 
     packet[-1] = calculate_checksum(packet[2:-1])
 
+    bytes_to_read = num_servos * 8  # Each servo sends 8-byte status packet
+    original_timeout = None
+
     try:
-        # Optionally override timeout
-        original_timeout = None
-        if timeout_s is not None:
-            original_timeout = ser.timeout
-            ser.timeout = timeout_s
-
-        # WRITE
-        write_start = time.perf_counter()
         with _SERIAL_LOCK:
-            ser.reset_input_buffer()
-            ser.write(packet)
-        write_dur = time.perf_counter() - write_start
+            if timeout_s is not None:
+                original_timeout = ser.timeout
+                ser.timeout = timeout_s
 
-        if poll_delay_s > 0.0:
-            time.sleep(poll_delay_s)
+            try:
+                write_start = time.perf_counter()
+                ser.reset_input_buffer()
+                ser.write(packet)
+                write_dur = time.perf_counter() - write_start
 
-        # READ
-        bytes_to_read = num_servos * 8  # Each servo sends 8-byte status packet
-        read_start = time.perf_counter()
-        with _SERIAL_LOCK:
-            response_data = ser.read(bytes_to_read)
-        read_dur = time.perf_counter() - read_start
+                if poll_delay_s > 0.0:
+                    time.sleep(poll_delay_s)
+
+                read_start = time.perf_counter()
+                response_data = ser.read(bytes_to_read)
+                read_dur = time.perf_counter() - read_start
+            finally:
+                if timeout_s is not None and original_timeout is not None:
+                    ser.timeout = original_timeout
 
         if len(response_data) < bytes_to_read:
             print(f"[Feetech SyncRead] WARNING: Expected {bytes_to_read} bytes, got {len(response_data)}.")
@@ -569,9 +570,6 @@ def sync_read_positions(
     except Exception as e:
         print(f"[Feetech SyncRead] Error: {e}")
         return {}
-    finally:
-        if timeout_s is not None and original_timeout is not None:
-            ser.timeout = original_timeout
 
 
 # =============================================================================
@@ -614,27 +612,31 @@ def sync_read_block(
         packet[7 + i] = servo_id
     packet[-1] = calculate_checksum(packet[2:-1])
 
+    per_packet = 6 + data_len
+    bytes_to_read = num_servos * per_packet
+    original_timeout = None
+
     try:
-        original_timeout = None
-        if timeout_s is not None:
-            original_timeout = ser.timeout
-            ser.timeout = timeout_s
-
-        write_start = time.perf_counter()
         with _SERIAL_LOCK:
-            ser.reset_input_buffer()
-            ser.write(packet)
-        write_dur = time.perf_counter() - write_start
+            if timeout_s is not None:
+                original_timeout = ser.timeout
+                ser.timeout = timeout_s
 
-        if poll_delay_s > 0.0:
-            time.sleep(poll_delay_s)
+            try:
+                write_start = time.perf_counter()
+                ser.reset_input_buffer()
+                ser.write(packet)
+                write_dur = time.perf_counter() - write_start
 
-        per_packet = 6 + data_len
-        bytes_to_read = num_servos * per_packet
-        read_start = time.perf_counter()
-        with _SERIAL_LOCK:
-            response_data = ser.read(bytes_to_read)
-        read_dur = time.perf_counter() - read_start
+                if poll_delay_s > 0.0:
+                    time.sleep(poll_delay_s)
+
+                read_start = time.perf_counter()
+                response_data = ser.read(bytes_to_read)
+                read_dur = time.perf_counter() - read_start
+            finally:
+                if timeout_s is not None and original_timeout is not None:
+                    ser.timeout = original_timeout
 
         if len(response_data) < per_packet:
             return {}
@@ -666,9 +668,6 @@ def sync_read_block(
     except Exception as e:
         print(f"[Feetech SyncReadBlk] Error: {e}")
         return {}
-    finally:
-        if timeout_s is not None and original_timeout is not None:
-            ser.timeout = original_timeout
 
 
 # =============================================================================

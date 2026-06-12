@@ -25,6 +25,36 @@ class FakeSerial:
         return self.response[:size]
 
 
+class RecordingLock:
+    def __init__(self, events: list[str]):
+        self.events = events
+
+    def __enter__(self):
+        self.events.append("lock_enter")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.events.append("lock_exit")
+        return False
+
+
+class RecordingSerial(FakeSerial):
+    def __init__(self, response: bytes, events: list[str]):
+        super().__init__(response)
+        self.events = events
+
+    def reset_input_buffer(self) -> None:
+        self.events.append("reset")
+
+    def write(self, packet: bytes) -> None:
+        self.events.append("write")
+        super().write(packet)
+
+    def read(self, size: int) -> bytes:
+        self.events.append("read")
+        return super().read(size)
+
+
 def _status_packet(servo_id: int, status: int, data: bytes) -> bytes:
     body = bytes([servo_id, len(data) + 2, status]) + data
     return b"\xff\xff" + body + bytes([feetech_protocol.calculate_checksum(body)])
@@ -136,6 +166,40 @@ class TestServoProtocol(unittest.TestCase):
         )
 
         self.assertEqual(block, {20: bytes([0x5C, 0x06])})
+
+    def test_feetech_sync_read_positions_holds_one_lock_for_transaction(self) -> None:
+        events: list[str] = []
+        packet = _status_packet(20, 0x00, bytes([0x5C, 0x06]))
+        original_lock = feetech_protocol._SERIAL_LOCK
+        feetech_protocol._SERIAL_LOCK = RecordingLock(events)
+        try:
+            positions = feetech_protocol.sync_read_positions(
+                RecordingSerial(packet, events),
+                [20],
+            )
+        finally:
+            feetech_protocol._SERIAL_LOCK = original_lock
+
+        self.assertEqual(positions, {20: 1628})
+        self.assertEqual(events, ["lock_enter", "reset", "write", "read", "lock_exit"])
+
+    def test_feetech_sync_read_block_holds_one_lock_for_transaction(self) -> None:
+        events: list[str] = []
+        packet = _status_packet(20, 0x00, bytes([0x5C, 0x06]))
+        original_lock = feetech_protocol._SERIAL_LOCK
+        feetech_protocol._SERIAL_LOCK = RecordingLock(events)
+        try:
+            block = feetech_protocol.sync_read_block(
+                RecordingSerial(packet, events),
+                [20],
+                start_address=0x38,
+                data_len=2,
+            )
+        finally:
+            feetech_protocol._SERIAL_LOCK = original_lock
+
+        self.assertEqual(block, {20: bytes([0x5C, 0x06])})
+        self.assertEqual(events, ["lock_enter", "reset", "write", "read", "lock_exit"])
 
     def test_feetech_status_telemetry_uses_status_bit_names(self) -> None:
         data = bytes([0x20, 0x00, 0x00, 0x00, 0x00])

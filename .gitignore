@@ -29,6 +29,8 @@ dist/
 # Logs and data
 # ----------------------------------------------------------------
 *.log
+logs/
+diagnostics/jog_motion/
 *.pid
 performance_log.csv
 performance_charts.png
