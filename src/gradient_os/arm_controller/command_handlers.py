@@ -832,16 +832,33 @@ def _force_stop_jog_controller(join_timeout_s: float = 0.5):
         utils.trajectory_state["jog_thread"] = None
 
 
+def _stop_jog_and_brake(reason: str) -> bool:
+    _force_stop_jog_controller()
+    braked = _brake_to_current_position(reason)
+    utils.trajectory_state["jog_release_braked"] = bool(braked)
+    return braked
+
+
 def _brake_to_current_position(reason: str) -> bool:
     current_angles = actuators.get_joint_positions(verbose=False)
-    if current_angles:
-        print(f"[Jog] Brake to current position ({reason}): {np.round(current_angles, 3)}")
-        actuators.set_joint_positions(current_angles, 0, 100)
+    if current_angles is not None and len(current_angles) > 0:
+        hold_angles = [float(value) for value in current_angles]
+        print(
+            f"[Jog] Brake to current position ({reason}): {np.round(hold_angles, 3)} "
+            f"speed={JOG_BRAKE_SPEED_REGISTER} accel={JOG_BRAKE_ACCELERATION_DEG_S2:g}"
+        )
+        actuators.set_joint_positions(
+            hold_angles,
+            JOG_BRAKE_SPEED_REGISTER,
+            JOG_BRAKE_ACCELERATION_DEG_S2,
+        )
         _write_jog_diag(
             "brake",
             force=utils.trajectory_state.get("jog_debug", False),
             reason=reason,
-            actual_joint_angles_rad=current_angles,
+            actual_joint_angles_rad=hold_angles,
+            brake_speed_register=JOG_BRAKE_SPEED_REGISTER,
+            brake_acceleration_deg_s2=JOG_BRAKE_ACCELERATION_DEG_S2,
         )
         return True
 
@@ -1167,8 +1184,28 @@ def _env_int(name: str, default: int, *, min_value: int | None = None, max_value
     return value
 
 
+def _env_float(name: str, default: float, *, min_value: float | None = None, max_value: float | None = None) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"[Jog] WARNING: Ignoring invalid {name}={raw!r}; using {default}.")
+        return default
+    if min_value is not None and value < min_value:
+        print(f"[Jog] WARNING: Clamping {name}={value} to {min_value}.")
+        return min_value
+    if max_value is not None and value > max_value:
+        print(f"[Jog] WARNING: Clamping {name}={value} to {max_value}.")
+        return max_value
+    return value
+
+
 JOG_CONTROL_FREQUENCY_HZ = _env_int("GRADIENT_JOG_FREQUENCY_HZ", 25, min_value=1)
-JOG_SERVO_SPEED_REGISTER = _env_int("GRADIENT_JOG_SERVO_SPEED_REGISTER", 800, min_value=1)
+JOG_SERVO_SPEED_REGISTER = _env_int("GRADIENT_JOG_SERVO_SPEED_REGISTER", 800, min_value=1, max_value=4095)
+JOG_BRAKE_SPEED_REGISTER = _env_int("GRADIENT_JOG_BRAKE_SPEED_REGISTER", 4095, min_value=1, max_value=4095)
+JOG_BRAKE_ACCELERATION_DEG_S2 = _env_float("GRADIENT_JOG_BRAKE_ACCELERATION_DEG_S2", 0.0, min_value=0.0)
 JOG_VELOCITY_TIMEOUT_S = 0.5  # If no command received in this time, stop
 MAX_JOG_LINEAR_M_S = 0.2      # Safety cap per-axis
 MAX_JOG_ANGULAR_DEG_S = 180.0 # Safety cap per-axis
@@ -1961,6 +1998,7 @@ def handle_jog_start(mode: str | None = None):
     utils.trajectory_state["jog_target_orientation_matrix"] = None
     utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
     utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
+    utils.trajectory_state["jog_release_braked"] = False
     if utils.trajectory_state.get("jog_debug", False):
         _ensure_jog_diag_log()
         _set_jog_serial_io_diagnostics(True)
@@ -1975,13 +2013,16 @@ def handle_jog_start(mode: str | None = None):
 def handle_jog_stop():
     """Stops the real-time jogging mode."""
     print("[Jog] Stopping jog mode...")
+    was_jogging = bool(utils.trajectory_state.get("is_jogging", False))
+    already_braked = bool(utils.trajectory_state.get("jog_release_braked", False))
     _force_stop_jog_controller()
     utils.trajectory_state["weld_active"] = False
     utils.trajectory_state["current_weld_type"] = None
     utils.trajectory_state["jog_target_position_m"] = None
     utils.trajectory_state["jog_target_orientation_matrix"] = None
 
-    _brake_to_current_position("jog stop")
+    if was_jogging and not already_braked:
+        _brake_to_current_position("jog stop")
     _set_jog_serial_io_diagnostics(False)
     _close_jog_diag_log()
     
@@ -2012,9 +2053,11 @@ def handle_set_jog_deadman(enabled: bool):
     # Touch the timestamp so timeout doesn't immediately zero after engage
     utils.trajectory_state["last_jog_command_time"] = time.monotonic()
     if not enabled:
-        utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
-        utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
-        _brake_to_current_position("deadman released")
+        if utils.trajectory_state.get("is_jogging", False):
+            _stop_jog_and_brake("deadman released")
+        else:
+            utils.trajectory_state["jog_velocities"] = np.zeros(6, dtype=float)
+            utils.trajectory_state["jog_gripper_velocity_deg_s"] = 0.0
     if utils.trajectory_state.get("jog_debug", False):
         print(f"[Jog] Deadman set to {enabled}")
 

@@ -54,6 +54,29 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float, *, min_value: float | None = None) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"[Controller] WARNING: Ignoring invalid {name}={raw!r}; using {default}.")
+        return default
+    if min_value is not None and value < min_value:
+        print(f"[Controller] WARNING: Clamping {name}={value} to {min_value}.")
+        return min_value
+    return value
+
+
+def _controller_is_actively_commanding() -> bool:
+    return bool(
+        utils.trajectory_state.get("is_running", False)
+        or utils.trajectory_state.get("is_jogging", False)
+        or utils.trajectory_state.get("weld_active", False)
+    )
+
+
 def _json_diagnostic_safe(value):
     if value is None:
         return None
@@ -449,6 +472,17 @@ Examples:
 
         def _telemetry_loop():
             period = 1.0 / max(1, int(telemetry_hz))
+            idle_position_read_hz = _env_float(
+                "GRADIENT_IDLE_TELEMETRY_POSITION_READ_HZ",
+                10.0,
+                min_value=0.0,
+            )
+            idle_position_read_period = (
+                1.0 / idle_position_read_hz
+                if idle_position_read_hz > 0.0
+                else None
+            )
+            last_idle_position_read = 0.0
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             telemetry_sequence = 0
 
@@ -457,6 +491,7 @@ Examples:
                 target=telemetry_target,
                 telemetry_hz=telemetry_hz,
                 period_s=period,
+                idle_position_read_hz=idle_position_read_hz,
                 servo_backend=servo_backend,
                 robot=selected_robot.name,
                 telemetry_blocks=[],
@@ -471,6 +506,8 @@ Examples:
                 measured_joint_source = None
                 measured_joint_updated_at = None
                 measured_joint_valid = False
+                active_commanding = False
+                idle_position_read = False
                 send_ms = None
                 payload_bytes = 0
                 q = None
@@ -478,7 +515,16 @@ Examples:
                 extra_block_reads: list[dict[str, object]] = []
                 alerts_count = 0
                 try:
+                    active_commanding = _controller_is_actively_commanding()
                     read_start = time.perf_counter()
+                    if (
+                        not active_commanding
+                        and idle_position_read_period is not None
+                        and loop_start_perf - last_idle_position_read >= idle_position_read_period
+                    ):
+                        q = list(actuators.get_joint_positions(verbose=False))
+                        last_idle_position_read = loop_start_perf
+                        idle_position_read = True
                     measured_snapshot = utils.get_latest_measured_joint_snapshot()
                     joint_read_ms = (time.perf_counter() - read_start) * 1000.0
                     measured_joint_valid = bool(measured_snapshot.get("valid"))
@@ -486,7 +532,8 @@ Examples:
                     measured_joint_source = measured_snapshot.get("source")
                     measured_joint_updated_at = measured_snapshot.get("updated_at")
                     snapshot_joints = measured_snapshot.get("joints")
-                    q = list(snapshot_joints) if isinstance(snapshot_joints, list) else []
+                    if q is None:
+                        q = list(snapshot_joints) if isinstance(snapshot_joints, list) else []
                     if not q:
                         q = list(utils.current_logical_joint_angles_rad)
                         measured_joint_source = "legacy_current_fallback"
@@ -539,6 +586,8 @@ Examples:
                         measured_joint_source=measured_joint_source,
                         measured_joint_updated_at=measured_joint_updated_at,
                         measured_joint_valid=measured_joint_valid,
+                        active_commanding=active_commanding,
+                        idle_position_read=idle_position_read,
                         gripper=float(g) if g is not None else None,
                         jog_ik=_summarize_jog_ik_status(jog_ik_status),
                         servo_block_reads=extra_block_reads,

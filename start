@@ -248,6 +248,70 @@ stop_all() {
   exit "${status}"
 }
 
+wait_for_controller_ready() {
+  local controller_pid="$1"
+  local controller_host="${GRADIENT_CONTROLLER_HOST:-127.0.0.1}"
+  local controller_port="${GRADIENT_CONTROLLER_PORT:-3000}"
+  local timeout_s="${GRADIENT_CONTROLLER_START_TIMEOUT_S:-60}"
+
+  echo "[gradient-robotics] Waiting for controller GET_STATUS at ${controller_host}:${controller_port}..."
+  set +e
+  "${VENV_PY}" - "${controller_host}" "${controller_port}" "${timeout_s}" "${controller_pid}" <<'PY'
+import os
+import socket
+import sys
+import time
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+timeout_s = float(sys.argv[3])
+controller_pid = int(sys.argv[4])
+
+deadline = time.monotonic() + timeout_s
+last_error = None
+
+while time.monotonic() < deadline:
+    try:
+        os.kill(controller_pid, 0)
+    except ProcessLookupError:
+        print(f"controller process {controller_pid} exited before GET_STATUS responded", file=sys.stderr)
+        sys.exit(2)
+    except PermissionError:
+        pass
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.25)
+    try:
+        sock.sendto(b"GET_STATUS", (host, port))
+        data, _addr = sock.recvfrom(1024)
+        text = data.decode("utf-8", errors="ignore")
+        if text.startswith("STATUS"):
+            print(f"[gradient-robotics] Controller ready: {text}")
+            sys.exit(0)
+        last_error = f"unexpected response {text!r}"
+    except (OSError, socket.timeout) as exc:
+        last_error = str(exc)
+    finally:
+        sock.close()
+
+    time.sleep(0.25)
+
+print(
+    f"timed out after {timeout_s:.1f}s waiting for GET_STATUS at {host}:{port}"
+    + (f"; last error: {last_error}" if last_error else ""),
+    file=sys.stderr,
+)
+sys.exit(1)
+PY
+  local wait_status="$?"
+  set -e
+
+  if [[ "${wait_status}" -ne 0 ]]; then
+    echo "[gradient-robotics] ERROR: Controller did not become ready; stopping stack." >&2
+    stop_all "${wait_status}"
+  fi
+}
+
 trap 'stop_all 130' INT
 trap 'stop_all 143' TERM
 trap 'stop_all $?' EXIT
@@ -276,6 +340,8 @@ echo "  vision=false"
 api_host="http://127.0.0.1:${GRADIENT_API_PORT:-4000}"
 
 launch controller "${controller_cmd[@]}"
+controller_pid="${pids[$((${#pids[@]} - 1))]}"
+wait_for_controller_ready "${controller_pid}"
 launch api "${VENV_PY}" -m gradient_os.api.main
 if [[ "${HEBI_BRIDGE}" == "true" ]]; then
   hebi_cmd=("${VENV_PY}" -m gradient_os.teleop.hebi_mobile_io_bridge --api-host "${api_host}")

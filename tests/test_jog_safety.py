@@ -36,11 +36,13 @@ def test_jog_joint_target_uses_nearest_limited_wraparound_angle(monkeypatch):
     assert abs(q_limited[5] - q_current[5]) < np.deg2rad(2.0)
 
 
-def test_deadman_release_zeroes_velocity_without_stopping_jog(monkeypatch):
+def test_deadman_release_stops_jog_and_brakes_once(monkeypatch):
     command_handlers.utils.trajectory_state["is_jogging"] = True
     command_handlers.utils.trajectory_state["jog_deadman"] = True
     command_handlers.utils.trajectory_state["jog_velocities"] = np.ones(6, dtype=float)
     command_handlers.utils.trajectory_state["jog_gripper_velocity_deg_s"] = 12.0
+    command_handlers.utils.trajectory_state["jog_target_position_m"] = np.ones(3, dtype=float)
+    command_handlers.utils.trajectory_state["jog_target_orientation_matrix"] = np.eye(3)
 
     brake_calls = []
     monkeypatch.setattr(
@@ -51,11 +53,47 @@ def test_deadman_release_zeroes_velocity_without_stopping_jog(monkeypatch):
 
     command_handlers.handle_set_jog_deadman(False)
 
-    assert command_handlers.utils.trajectory_state["is_jogging"] is True
+    assert command_handlers.utils.trajectory_state["is_jogging"] is False
     assert command_handlers.utils.trajectory_state["jog_deadman"] is False
     np.testing.assert_allclose(command_handlers.utils.trajectory_state["jog_velocities"], np.zeros(6))
     assert command_handlers.utils.trajectory_state["jog_gripper_velocity_deg_s"] == 0.0
+    assert command_handlers.utils.trajectory_state["jog_target_position_m"] is None
+    assert command_handlers.utils.trajectory_state["jog_target_orientation_matrix"] is None
+    assert command_handlers.utils.trajectory_state["jog_release_braked"] is True
     assert brake_calls == ["deadman released"]
+
+
+def test_jog_stop_skips_second_brake_after_deadman_release(monkeypatch):
+    command_handlers.utils.trajectory_state["is_jogging"] = False
+    command_handlers.utils.trajectory_state["jog_release_braked"] = True
+
+    brake_calls = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_brake_to_current_position",
+        lambda reason: brake_calls.append(reason) or True,
+    )
+
+    command_handlers.handle_jog_stop()
+
+    assert brake_calls == []
+
+
+def test_brake_to_current_position_uses_explicit_hold_profile(monkeypatch):
+    reads = [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]]
+    writes = []
+    monkeypatch.setattr(command_handlers.actuators, "get_joint_positions", lambda verbose=False: reads[0])
+    monkeypatch.setattr(
+        command_handlers.actuators,
+        "set_joint_positions",
+        lambda positions, speed, accel: writes.append((positions, speed, accel)),
+    )
+    monkeypatch.setattr(command_handlers, "JOG_BRAKE_SPEED_REGISTER", 4095)
+    monkeypatch.setattr(command_handlers, "JOG_BRAKE_ACCELERATION_DEG_S2", 0.0)
+
+    assert command_handlers._brake_to_current_position("test") is True
+
+    assert writes == [(reads[0], 4095, 0.0)]
 
 
 def test_jog_thread_rechecks_stop_before_servo_command(monkeypatch):
